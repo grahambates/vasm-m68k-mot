@@ -17,9 +17,9 @@ hashtable *dirhash;
 char commentchar = ';';
 int dotdirs;
 
-static char code_name[] = "CODE";
-static char data_name[] = "DATA";
-static char bss_name[] = "BSS";
+static char code_name[] = ".text";
+static char data_name[] = ".data";
+static char bss_name[] = ".bss";
 static char code_type[] = "acrx";
 static char data_type[] = "adrw";
 static char bss_type[] = "aurw";
