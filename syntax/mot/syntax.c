@@ -471,6 +471,17 @@ static void handle_section(char *s)
   }
 
   if (s) {
+    if(mem==2) {
+	  char *p=mymalloc(strlen(name)+11);
+	  sprintf(p, "%s.MEMF_CHIP", name);
+	  name = p;
+
+    } else if(mem==4) {
+	  char *p=mymalloc(strlen(name)+11);
+	  sprintf(p, "%s.MEMF_FAST", name);
+	  name = p;
+    }
+
     motsection(new_section(name,attr,1),mem);
     switch_section(name,attr);
   }
@@ -516,32 +527,32 @@ static void handle_bss(char *s)
 
 static void handle_codec(char *s)
 {
-  nameattrsection("CODE_C",code_type,2);  /* AmigaDOS MEMF_CHIP */
+  nameattrsection("code.MEMF_CHIP",code_type,2);  /* AmigaDOS MEMF_CHIP */
 }
 
 static void handle_codef(char *s)
 {
-  nameattrsection("CODE_F",code_type,4);  /* AmigaDOS MEMF_FAST */
+  nameattrsection("code.MEMF_FAST",code_type,4);  /* AmigaDOS MEMF_FAST */
 }
 
 static void handle_datac(char *s)
 {
-  nameattrsection("DATA_C",data_type,2);  /* AmigaDOS MEMF_CHIP */
+  nameattrsection("data.MEMF_CHIP",data_type,2);  /* AmigaDOS MEMF_CHIP */
 }
 
 static void handle_dataf(char *s)
 {
-  nameattrsection("DATA_F",data_type,4);  /* AmigaDOS MEMF_FAST */
+  nameattrsection("data.MEMF_FAST",data_type,4);  /* AmigaDOS MEMF_FAST */
 }
 
 static void handle_bssc(char *s)
 {
-  nameattrsection("BSS_C",bss_type,2);  /* AmigaDOS MEMF_CHIP */
+  nameattrsection("bss.MEMF_CHIP",bss_type,2);  /* AmigaDOS MEMF_CHIP */
 }
 
 static void handle_bssf(char *s)
 {
-  nameattrsection("BSS_F",bss_type,4);  /* AmigaDOS MEMF_FAST */
+  nameattrsection("bss.MEMF_FAST",bss_type,4);  /* AmigaDOS MEMF_FAST */
 }
 
 
