@@ -9,17 +9,16 @@
 #define INSTR_DEBUG (1)
 #endif
 
-char *cpu_copyright="vasm TR3200 cpu module v0.2 by Luis Panadero Guardeno";
+const char *cpu_copyright="vasm TR3200 cpu module v0.2 by Luis Panadero Guardeno";
 
-char *cpuname="tr3200";
-int bitsperbyte=8;
+const char *cpuname="tr3200";
 int bytespertaddr=4;
 
 mnemonic mnemonics[]={
 #include "opcodes.h"
 };
 
-int mnemonic_cnt=sizeof(mnemonics)/sizeof(mnemonics[0]);
+const int mnemonic_cnt=sizeof(mnemonics)/sizeof(mnemonics[0]);
 
 
 static taddr opsize(operand *p, unsigned char num_operands, section *sec, taddr pc);
@@ -107,7 +106,7 @@ static int parse_reg(char **p, int len, operand *op)
 
   rp++;
   /* Get number */
-  if (len < 2 || sscanf(rp, "%u", &reg) != 1) {
+  if (len < 2 || sscanf(rp, "%d", &reg) != 1) {
     return 0;
   }
 
@@ -431,7 +430,7 @@ dblock *eval_data(operand *op, size_t bitsize, section *sec, taddr pc)
     if (base)
       add_extnreloc(&new->relocs, base, val,
                     btype==BASE_PCREL ? REL_PC : REL_ABS, 0, bitsize, 0);
-    else if (btype != BASE_NONE)
+    else
       general_error(38);  /* illegal relocation */
   }
 
@@ -494,7 +493,7 @@ size_t instruction_size (instruction *p, section *sec, taddr pc)
   return size;
 }
 
-operand *new_operand()
+operand *new_operand(void)
 {
   operand *new = mymalloc(sizeof(*new));
   new->type=-1;
@@ -502,7 +501,7 @@ operand *new_operand()
 }
 
 /* return true, if initialization was successful */
-int init_cpu()
+int init_cpu(void)
 {
   return 1;
 }

@@ -8,20 +8,18 @@
 mnemonic mnemonics[] = {
 #include "opcodes.h"
 };
+const int mnemonic_cnt = sizeof(mnemonics) / sizeof(mnemonics[0]);
 
-int mnemonic_cnt = sizeof(mnemonics) / sizeof(mnemonics[0]);
-
-int		bitsperbyte = 8;
 int		bytespertaddr = 2;
-char *		cpu_copyright = "vasm 6800/6801/68hc11 cpu backend 0.5 (c) 2013-2016,2019,2021 Esben Norby";
-char *		cpuname = "6800";
+const char *	cpu_copyright = "vasm 6800/6801/68hc11 cpu backend 0.5 (c) 2013-2016,2019,2021 Esben Norby";
+const char *	cpuname = "6800";
 
 static uint8_t	cpu_type = M6800;
 static int 	modifier;	/* set by find_base() */
 
 
 int
-init_cpu()
+init_cpu(void)
 {
 	return 1;
 }
@@ -70,7 +68,7 @@ parse_cpu_special(char *start)
 
 
 operand *
-new_operand()
+new_operand(void)
 {
 	operand *new = mymalloc(sizeof(*new));
 	new->type = -1;
@@ -139,7 +137,7 @@ parse_operand(char *p, int len, operand *op, int required)
 	}
 
 	p = skip(p);
-	if (p-start < len) {
+	if (*p && p-start<len) {
 		cpu_error(0);  /* trailing garbage */
 		return PO_CORRUPT;
 	}
@@ -342,7 +340,7 @@ eval_data(operand *op, size_t bitsize, section *sec, taddr pc)
 				break;
 			}
 		}
-		else if (btype != BASE_NONE)
+		else
 			general_error(38);  /* illegal relocation */
 	}
 

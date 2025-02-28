@@ -3,16 +3,15 @@
 
 #include "vasm.h"
 
-char *cpu_copyright="vasm c16x/st10 cpu backend 0.2c (c) in 2002-2005 Volker Barthelmann";
-char *cpuname="c16x";
+const char *cpu_copyright="vasm c16x/st10 cpu backend 0.2c (c) in 2002-2005 Volker Barthelmann";
+const char *cpuname="c16x";
 
 mnemonic mnemonics[]={
 #include "opcodes.h"
 };
 
-int mnemonic_cnt=sizeof(mnemonics)/sizeof(mnemonics[0]);
+const int mnemonic_cnt=sizeof(mnemonics)/sizeof(mnemonics[0]);
 
-int bitsperbyte=8;
 int bytespertaddr=4;
 
 static int JMPA,JMPR,JMPS,JNB,JB,JBC,JNBS,JMP;
@@ -341,7 +340,7 @@ static taddr absoffset2(expr *tree,int mod,section *sec,taddr pc,rlist **relocs,
     if(mod==MOD_DPPX){
       static int dpplen;
       static char *dppname;
-      char *id=base->name;
+      const char *id=base->name;
       symbol *dppsym;
       size-=2;
       if(strlen(id)+9>dpplen){
@@ -660,7 +659,7 @@ size_t instruction_size(instruction *p,section *sec,taddr pc)
   return mnemonics[c].ext.len*2+add;
 }
 
-operand *new_operand()
+operand *new_operand(void)
 {
   operand *new=mymalloc(sizeof(*new));
   new->type=-1;
@@ -668,7 +667,7 @@ operand *new_operand()
 }
 
 /* return true, if initialization was successful */
-int init_cpu()
+int init_cpu(void)
 {
   int i;
   for(i=0;i<mnemonic_cnt;i++){

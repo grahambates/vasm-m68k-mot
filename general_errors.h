@@ -13,7 +13,7 @@
   "could not open <%s> for input",ERROR|FATAL,
   "could not open <%s> for output",NOLINE|ERROR|FATAL,
   "unknown option <%s>",NOLINE|ERROR,
-  "no input file specified",NOLINE|ERROR|FATAL,                 /* 15 */
+  "%s module doesn't support %d-bit bytes",NOLINE|ERROR|FATAL,  /* 15 */
   "could not initialize output module <%s>",NOLINE|ERROR|FATAL,
   "out of memory",NOLINE|ERROR|FATAL,
   "symbol <%s> recursively defined",ERROR|FATAL,
@@ -59,7 +59,7 @@
   "register symbol <%s> redefined",ERROR,
   "cannot evaluate constant huge integer expression",ERROR,
   "cannot evaluate floating point expression",ERROR,            /* 60 */
-  "imported symbol <%s> was not referenced",WARNING,
+  "imported symbol <%s> was not referenced",NOLINE|WARNING,
   "symbol <%s> already defined with %s scope",WARNING,
   "unexpected \"else\" without \"if\"",ERROR,
   "unexpected \"endif\" without \"if\"",ERROR,
@@ -79,3 +79,11 @@
   "illegal value for option: %s",NOLINE|ERROR,
   "%s backend does not support floating point",ERROR|FATAL,
   "unknown listing file format \"%s\" ignored",NOLINE|WARNING,  /* 80 */
+  "cannot export equate based on imported symbol: <%s>",NOLINE|ERROR,
+  "label definition not allowed here",ERROR,
+  "label defined on the same line as a new section",WARNING,
+  "no debug output possible with source from stdin",WARNING,
+  "external symbol <%s> must not be defined",ERROR,             /* 85 */
+  "missing definition for symbol <%s>",NOLINE|WARNING,
+  "additional macro arguments ignored (expecting %d)",WARNING,
+  "macro previously defined at line %d of %s",WARNING,

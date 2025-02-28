@@ -15,7 +15,7 @@ selected with the @option{-Felf} option.
 @section General
 
 This output module outputs the @code{ELF} (Executable and Linkable Format)
-format, which is a portable object file format which works for a variety
+format, which is a portable object file format and works for a variety
 of 32- and 64-bit operating systems.
 
 @section Restrictions
@@ -25,12 +25,12 @@ the following architectures:
 
 @itemize @minus
 
-@item PowerPC
-@item M68k
 @item ARM
 @item i386
-@item x86_64
 @item Jaguar RISC
+@item M68k, ColdFire
+@item PowerPC
+@item x86_64
 
 @end itemize
 

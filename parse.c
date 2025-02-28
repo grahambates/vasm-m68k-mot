@@ -1,10 +1,10 @@
 /* parse.c - global parser support functions */
-/* (c) in 2009-2021 by Volker Barthelmann and Frank Wille */
+/* (c) in 2009-2024 by Volker Barthelmann and Frank Wille */
 
 #include "vasm.h"
 
-int esc_sequences = 0;  /* do not handle escape sequences by default */
-int nocase_macros = 0;  /* macro names are case-insensitive */
+int esc_sequences;      /* do not handle escape sequences by default */
+int nocase_macros;      /* macro names are case-insensitive */
 int maxmacparams = MAXMACPARAMS;
 int maxmacrecurs = MAXMACRECURS;
 int msource_disable;    /* true: disable source level debugging within macro */
@@ -117,9 +117,11 @@ char *cut_trail_blanks(char *s)
 }
 
 
-char *parse_name(char **start)
-/* parses a quoted or unquoted name-string and returns a pointer to it */
+strbuf *parse_name(int n,char **start)
+/* Parses a quoted or unquoted name-string and returns a pointer to a
+   null-terminated string in one of two temporary buffers. */
 {
+  static strbuf buf[2];
   char *s = *start;
   char c,*name;
 
@@ -128,7 +130,7 @@ char *parse_name(char **start)
     name = s;
     while (*s && *s!=c)
       s++;
-    name = cnvstr(name,s-name);
+    cutstr(&buf[n],name,s-name);
     if (*s)
       s = skip(s+1);
   }
@@ -138,7 +140,7 @@ char *parse_name(char **start)
     name = s;
     while (*s && *s!='>')
       s++;
-    name = cnvstr(name,s-name);
+    cutstr(&buf[n],name,s-name);
     if (*s)
       s = skip(s+1);
   }
@@ -148,14 +150,14 @@ char *parse_name(char **start)
     while (!ISEOL(s) && !isspace((unsigned char)*s) && *s!=',')
       s++;
     if (s != name) {
-      name = cnvstr(name,s-name);
+      cutstr(&buf[n],name,s-name);
       s = skip(s);
     }
     else
-      name = NULL;  /* nothing read */
+      return NULL;  /* nothing read */
   }
   *start = s;
-  return name;
+  return &buf[n];
 }
 
 
@@ -191,16 +193,45 @@ char *skip_identifier(char *s)
 }
 
 
-char *parse_identifier(char **s)
+strbuf *parse_identifier(int n,char **s)
+/* Parses an identifier string, as used for symbol names, and returns a
+   pointer to a null-terminated string in one of two temporary buffers. */
 {
+  static strbuf buf[EXPBUFNO+1];
   char *name = *s;
   char *endname;
 
   if (endname = skip_identifier(name)) {
     *s = endname;
-    return cnvstr(name,endname-name);
+    cutstr(&buf[n],name,endname-name);
+    return &buf[n];
   }
   return NULL;
+}
+
+
+strbuf *get_raw_string(char **str,char delim)
+/* parse a raw string (i.e. no escape handling) between the given
+   delimitters, return NULL on error, otherwise update stream pointer */
+{
+  static strbuf buf;
+  char *p = *str;
+  char *start;
+
+  if (*p++ != delim) {
+    general_error(6,delim);  /* " expected */
+    return NULL;
+  }
+  start = p;
+  while (*p&&*p!=delim)
+    p++;
+  if (!*p) {
+    general_error(6,delim);  /* " expected */
+    return NULL;
+  }
+  cutstr(&buf,start,p-start);
+  *str = ++p;
+  return &buf;
 }
 
 
@@ -228,9 +259,9 @@ char *skip_string(char *s,char delim,size_t *size)
     }
     n++;
   }
-
   if (*(s-1) != delim)
-    general_error(6,delim);  /* " expected */
+    n = 1;  /* missing closing-quote, so not a string, try as single-char */
+
   if (size)
     *size = n;
   return s;
@@ -238,15 +269,15 @@ char *skip_string(char *s,char delim,size_t *size)
 
 
 char *read_string(char *p,char *s,char delim,int width)
-/* read string contents with width bits for each character into a buffer p,
+/* Read string contents with width bits for each character into a buffer p,
    optionally starting with a delim-character, excluding the terminating
-   character */
+   character.
+   When a target-byte (BITSPERBYTE) has space for multiple characters
+   of width, then they will be compressed into it. */
 {
+  utaddr val = 0;
+  int bitcnt = 0;
   char c;
-
-  if (width & 7)
-    ierror(0);
-  width >>= 3;
 
   if (*s == delim)
     s++;
@@ -265,9 +296,20 @@ char *read_string(char *p,char *s,char delim,int width)
       }
     }
     if (p) {
-      setval(BIGENDIAN,p,width,(unsigned char)c);
-      p += width;
+      val <<= width;
+      val |= (uint8_t)c;
+      bitcnt += width;
+      if (bitcnt+width > BITSPERBYTE) {
+        size_t n = (bitcnt+BITSPERBYTE-1) / BITSPERBYTE;
+        setval(BIGENDIAN,p,n,val);
+        p += OCTETS(n);
+        bitcnt = 0;
+      }
     }
+  }
+  if (bitcnt && p) {
+    val <<= ((BITSPERBYTE - bitcnt) / width) * width;
+    setval(0,p,1,val);
   }
   return s;
 }
@@ -281,15 +323,17 @@ dblock *parse_string(char **str,char delim,int width)
 
   if (width & 7)
     ierror(0);
+  if (ISEOL(s))
+    return NULL;
 
   /* how many bytes do we need for the string? */
   skip_string(s,delim,&size);
   if (size == 1)
-    return NULL; /* it's just one char, so use eval_expr() on it */
+    return NULL; /* not a string, so we can use eval_expr() on it */
 
   db = new_dblock();
-  db->size = size * (size_t)(width>>3);
-  db->data = db->size ? mymalloc(db->size) : NULL;
+  db->size = (size + (BITSPERBYTE / width) - 1) / (BITSPERBYTE / width);
+  db->data = db->size ? mymalloc(OCTETS(db->size)) : NULL;
 
   /* now copy the string for real into the dblock */
   s = read_string((char *)db->data,s,delim,width);
@@ -298,15 +342,15 @@ dblock *parse_string(char **str,char delim,int width)
 }
 
 
-char *parse_symbol(char **s)
-/* return pointer to an allocated local/global symbol string, or NULL */
+char *parse_symbol_strbuf(int n,char **s)
+/* return ptr to a local/global symbol string in static buffer n, or NULL */
 {
-  char *name;
+  strbuf *name;
 
-  name = get_local_label(s);
+  name = get_local_label(n,s);
   if (name == NULL)
-    name = parse_identifier(s);
-  return name;
+    name = parse_identifier(n,s);
+  return name ? name->str : NULL;
 }
 
 
@@ -330,10 +374,8 @@ char *parse_labeldef(char **line,int needcolon)
       s++;
       needcolon = 0;
     }
-    if (needcolon) {
-      myfree(labname);
+    if (needcolon)
       labname = NULL;
-    }
     else
       *line = s;
   }
@@ -447,7 +489,7 @@ void new_repeat(int rcnt,char *name,char *vals,
     enddir_minlen = dirlist_minlen(endrlist);
     reptdir_list = reptlist;
     rept_start = cur_src->srcptr;
-    rept_name = name;
+    rept_name = name ? mystrdup(name) : NULL;
     rept_vals = vals;
     rept_cnt = rcnt;  /* also REPT_IRP or REPT_IRPC */
 
@@ -529,9 +571,14 @@ macro *new_macro(char *name,struct namelen *maclist,struct namelen *endmlist,
                  char *args)
 {
   hashdata data;
-  macro *m = NULL;
+  macro *m;
 
   if (cur_macro==NULL && cur_src!=NULL && enddir_list==NULL) {
+    if (m = find_macro(name,strlen(name))) {
+      /* replace the old definition and warn about it */
+      general_error(88,m->defline,m->defsrc->name);  /* macro redefinition */
+      rem_hashentry(macrohash,name,nocase_macros);
+    }
     m = mymalloc(sizeof(macro));
     m->name = mystrdup(name);
     if (nocase_macros)
@@ -664,6 +711,7 @@ int execute_macro(char *name,int name_len,char **q,int *q_len,int nq,
   m->recursions++;
 
   src = new_source(m->name,NULL,m->text,m->size);
+  src->macro = m;
   src->defsrc = m->defsrc;
   src->defline = m->defline;
   src->argnames = m->argnames;
@@ -752,14 +800,15 @@ int execute_macro(char *name,int name_len,char **q,int *q_len,int nq,
       break;
   }
 
-  if (n < 0)
-    n = m->num_argnames>=0 ? m->num_argnames : 0;
+  if (m->num_argnames >= 0) {
+    if (n > m->num_argnames)
+      general_error(87,m->num_argnames);  /* additional macro arguments ignored */
+    n = m->num_argnames;  /* named arguments define number of args */
+  }
   if (n > maxmacparams) {
     general_error(27,maxmacparams);  /* number of args exceeded */
     n = maxmacparams;
   }
-
-  src->macro = m;
   src->num_params = n;      /* >=0 indicates macro source */
 
   for (n=0; n<maxmacparams; n++) {
@@ -804,7 +853,7 @@ static void start_repeat(char *rept_end)
 {
   char buf[MAXPATHLEN];
   source *src;
-  char *p,*val;
+  char *p;
   int i;
 
   reptdir_list = NULL;
@@ -813,7 +862,7 @@ static void start_repeat(char *rept_end)
     ierror(0);
 
   if (rept_cnt != 0) {
-    sprintf(buf,"REPEAT:%s:line %d",cur_src->name,cur_src->line);
+    sprintf(buf,"REPEAT:%s:line %d",rept_defsrc->name,rept_defline);
     src = new_source(buf,NULL,rept_start,rept_end-rept_start);
     src->irpname = rept_name;
     src->irpvals = NULL;
@@ -832,10 +881,11 @@ static void start_repeat(char *rept_end)
           src->repeat = 1;
         }
         else {
+          strbuf *buf;
+
           src->repeat = 0;
-          while (val = parse_name(&p)) {
-            addmacarg(&src->irpvals,val,val+strlen(val));
-            myfree(val);
+          while (buf = parse_name(0,&p)) {
+            addmacarg(&src->irpvals,buf->str,buf->str+buf->len);
             src->repeat++;
             p = skip(p);
             if (*p == ',')
@@ -871,7 +921,7 @@ static void start_repeat(char *rept_end)
         break;
     }
 
-    if (cur_src->macro != NULL) {
+    if (cur_src->num_params >= 0) {
       /* repetition in a macro: get parameters */
       src->num_params = cur_src->num_params;
       for (i=0; i<src->num_params; i++) {

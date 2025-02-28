@@ -1,30 +1,35 @@
-/* output_bin.c binary output driver for vasm */
-/* (c) in 2002-2009,2013-2021 by Volker Barthelmann and Frank Wille */
+/* bin.c binary output driver for vasm */
+/* (c) in 2002-2009,2013-2024 by Volker Barthelmann and Frank Wille */
 
 #include "vasm.h"
 
 #ifdef OUTBIN
-static char *copyright="vasm binary output module 2.1 (c) 2002-2021 Volker Barthelmann and Frank Wille";
+static char *copyright="vasm binary output module 2.3c (c) 2002-2024 Volker Barthelmann and Frank Wille";
 
-#define BINFMT_RAW          0   /* no header */
-#define BINFMT_CBMPRG       1   /* Commodore VIC-20/C-64 PRG format */
-#define BINFMT_ATARICOM     2   /* Atari 800 DOS COM format */
-#define BINFMT_APPLEBIN     3   /* Apple DOS 3.3 binary file */
-#define BINFMT_DRAGONBIN    4   /* Dragon DOS binary format */
-#define BINFMT_COCOML       5   /* Tandy Color Computer machine lang. file */
-#define BINFMT_ORICMC       6   /* Oric machine code file */
-#define BINFMT_ORICMCX      7   /* Oric machine code file auto-exec */
+enum {
+  BINFMT_RAW,           /* no header */
+  BINFMT_CBMPRG,        /* Commodore VIC-20/C-64 PRG format */
+  BINFMT_ATARICOM,      /* Atari 800 DOS COM format */
+  BINFMT_APPLEBIN,      /* Apple DOS 3.3 binary file */
+  BINFMT_DRAGONBIN,     /* Dragon DOS binary format */
+  BINFMT_COCOML,        /* Tandy Color Computer machine lang. file */
+  BINFMT_ORICMC,        /* Oric machine code file */
+  BINFMT_ORICMCX,       /* Oric machine code file auto-exec */
+  BINFMT_FOENIXPGX,     /* C256 Foenix single-section format */
+  BINFMT_FOENIXPGZ      /* C256 Foenix multi-section format */
+};
 
 static int binfmt = BINFMT_RAW;
 static char *exec_symname;
 static taddr exec_addr;
+static int addrbits,coalesce;
 
 
 static int orgcmp(const void *sec1,const void *sec2)
 {
-  if (ULLTADDR((*(section **)sec1)->org) > ULLTADDR((*(section **)sec2)->org))
+  if (((utaddr)(*(section **)sec1)->org) > ((utaddr)(*(section **)sec2)->org))
     return 1;
-  if (ULLTADDR((*(section **)sec1)->org) < ULLTADDR((*(section **)sec2)->org))
+  if (((utaddr)(*(section **)sec1)->org) < ((utaddr)(*(section **)sec2)->org))
     return -1;
   return 0;
 }
@@ -32,17 +37,18 @@ static int orgcmp(const void *sec1,const void *sec2)
 
 static void write_output(FILE *f,section *sec,symbol *sym)
 {
-  section *s,*s2,**seclist,**slp;
-  atom *p;
+  section *s,**seclist,**slp;
+  unsigned long long pc=0,npc;
   size_t nsecs;
   long hdroffs;
-  unsigned long long pc=0,npc;
+  char *nptr;
+  atom *p;
 
-  if (!sec)
+  if (sec == NULL)
     return;
 
   for (; sym; sym=sym->next) {
-    if (sym->type == IMPORT)
+    if (sym->type==IMPORT)
       output_error(6,sym->name);  /* undefined symbol */
 
     if (exec_symname!=NULL && !strcmp(exec_symname,sym->name)) {
@@ -53,17 +59,8 @@ static void write_output(FILE *f,section *sec,symbol *sym)
   if (exec_symname != NULL)
     output_error(6,exec_symname);  /* start-symbol not found */
 
-  /* we don't support overlapping sections */
-  for (s=sec,nsecs=0; s!=NULL; s=s->next) {
-    for (s2=s->next; s2; s2=s2->next) {
-      if (((ULLTADDR(s2->org) >= ULLTADDR(s->org) &&
-            ULLTADDR(s2->org) < ULLTADDR(s->pc)) ||
-           (ULLTADDR(s2->pc) > ULLTADDR(s->org) &&
-            ULLTADDR(s2->pc) <= ULLTADDR(s->pc))))
-        output_error(0);
-    }
-    nsecs++;
-  }
+  /* we don't support overlapping sections, count sections */
+  nsecs = chk_sec_overlap(sec);
 
   /* make an array of section pointers, sorted by their start address */
   seclist = (section **)mymalloc(nsecs * sizeof(section *));
@@ -76,19 +73,6 @@ static void write_output(FILE *f,section *sec,symbol *sym)
 
   /* write an optional header first */
   switch (binfmt) {
-    case BINFMT_CBMPRG:
-      /* Commodore 6502 PRG header:
-       * 00: LSB of load address
-       * 01: MSB of load address
-       */
-      fw16(f,sec->org,0);
-      break;
-
-    case BINFMT_ATARICOM:
-      /* ATARI COM header: $FFFF */
-      fw16(f,0xffff,0);
-      break;
-
     case BINFMT_APPLEBIN:
       /* Apple DOS binary file header:
        * 00-01: load address (little endian)
@@ -97,6 +81,19 @@ static void write_output(FILE *f,section *sec,symbol *sym)
       fw16(f,sec->org,0);
       hdroffs = ftell(f);  /* remember location of file length */
       fw16(f,0,0);         /* skip file length, will be patched later */
+      break;
+
+    case BINFMT_ATARICOM:
+      /* ATARI COM header: $FFFF */
+      fw16(f,0xffff,0);
+      break;
+
+    case BINFMT_CBMPRG:
+      /* Commodore 6502 PRG header:
+       * 00: LSB of load address
+       * 01: MSB of load address
+       */
+      fw16(f,sec->org,0);
       break;
 
     case BINFMT_DRAGONBIN:
@@ -116,6 +113,30 @@ static void write_output(FILE *f,section *sec,symbol *sym)
       fw8(f,0xaa);
       break;
 
+    case BINFMT_FOENIXPGX:
+      /* C256 Foenix single-segment header PGX
+       * 00:    "PGX"
+       * 03:    $01 for 65816, $03 for 65C02 CPU
+       * 04-07: load/execute address (little endian)
+       */
+#if defined(VASM_CPU_650X)
+      if (cpu_type & (WDC65816|M65C02)) {
+        uint8_t id[4] = { 'P','G','X' };
+
+        id[3] = (cpu_type & WDC65816) ? 1 : 3;
+        fwdata(f,id,4);
+        fw32(f,sec->org,0);
+        break;
+      }
+#endif
+      cpu_error(1,cpuname);
+      return;
+
+    case BINFMT_FOENIXPGZ:
+      /* C256 Foenix multi-segment header PGZ: "Z" followed by seg. headers */
+      fw8(f,addrbits<32 ? 'Z' : 'z');	/* Z: 16/24-bit, z: 32-bit addresses */
+      break;
+
     case BINFMT_ORICMC:
     case BINFMT_ORICMCX:
       /* Oric machine code file header:
@@ -127,7 +148,7 @@ static void write_output(FILE *f,section *sec,symbol *sym)
        * 09-10: last address of data stored (big-endian)
        * 11-12: first address of data stored (big-endian)
        * 13:    reserved
-       * 14-  : null-terminated file name, maximum of 16 characters
+       * 14-  : null-terminated file name, maximum of 15 characters in name
        */
       fw32(f,0x16161616,1);
       fw8(f,0x24);
@@ -138,7 +159,12 @@ static void write_output(FILE *f,section *sec,symbol *sym)
       fw16(f,0,1);         /* skip last address, will be patched later */
       fw16(f,sec->org,1);
       fw8(f,0);
-      fprintf(f,"%s",outname);
+      nptr = outname;
+      while (*nptr) {
+        if (!stricmp(nptr,".tap") || (nptr-outname)>=15)
+          break;  /* remove .tap extension, no more than 15 characters */
+        fw8(f,toupper((unsigned char)*nptr++));
+      }
       fw8(f,0);
       break;
   }
@@ -174,19 +200,33 @@ static void write_output(FILE *f,section *sec,symbol *sym)
         fw16(f,s->org,1);
         break;
 
+      case BINFMT_FOENIXPGZ:
+        /* 00-02/00-03: load-address of segment (little endian)
+         * 03-05/04-07: size of segment (little endian)
+         */
+        if (addrbits < 32) {
+          fw24(f,s->org,0);
+          fw24(f,s->pc-s->org,0);
+        }
+        else {
+          fw32(f,s->org,0);
+          fw32(f,s->pc-s->org,0);
+        }
+        break;
+
       default:
         /* fill gap between sections with pad-bytes */
-        if (s!=seclist[0] && ULLTADDR(s->org) > pc)
-          fwalignpattern(f,ULLTADDR(s->org)-pc,s->pad,s->padbytes);
+        if (!coalesce && s!=seclist[0] && ((unsigned long long)s->org) > pc)
+          fwpattern(f,((unsigned long long)s->org)-pc,s->pad,s->padbytes);
         break;
     }
 
     /* write section contents */
-    for (p=s->first,pc=ULLTADDR(s->org); p; p=p->next) {
-      npc = ULLTADDR(fwpcalign(f,p,s,pc));
+    for (p=s->first,pc=(unsigned long long)s->org; p; p=p->next) {
+      npc = fwpcalign(f,p,s,pc);
 
       if (p->type == DATA)
-        fwdata(f,p->content.db->data,p->content.db->size);
+        fwdblock(f,p->content.db);
       else if (p->type == SPACE)
         fwsblock(f,p->content.sb);
 
@@ -216,6 +256,19 @@ static void write_output(FILE *f,section *sec,symbol *sym)
       fw16(f,exec_addr?exec_addr:sec->org,1);
       break;
 
+    case BINFMT_FOENIXPGZ:
+      /* trailer with execute-address and a zero-size to indicate that
+         no more segments follow */
+      if (addrbits < 32) {
+        fw24(f,exec_addr?exec_addr:sec->org,0);
+        fw24(f,0,0);
+      }
+      else {
+        fw32(f,exec_addr?exec_addr:sec->org,0);
+        fw32(f,0,0);
+      }
+      break;
+
     case BINFMT_ORICMC:
     case BINFMT_ORICMCX:
       fseek(f,hdroffs,SEEK_SET);
@@ -229,28 +282,47 @@ static void write_output(FILE *f,section *sec,symbol *sym)
 
 static int output_args(char *p)
 {
-  if (!strncmp(p,"-exec=",6)) {
+  long long val;
+
+  if (!strcmp(p,"-coalesced")) {
+    coalesce = 1;
+    return 1;
+  }
+  else if (!strncmp(p,"-exec=",6)) {
     exec_symname = p + 6;
     return 1;
   }
-  else if (!strcmp(p,"-cbm-prg")) {
-    binfmt = BINFMT_CBMPRG;
-    return 1;
-  }
-  else if (!strcmp(p,"-atari-com")) {
-    binfmt = BINFMT_ATARICOM;
+  else if (!strncmp(p,"-start=",7)) {
+    sscanf(p+7,"%lli",&val);
+    defsectorg = val;  /* set start of default section */
     return 1;
   }
   else if (!strcmp(p,"-apple-bin")) {
     binfmt = BINFMT_APPLEBIN;
     return 1;
   }
-  else if (!strcmp(p,"-dragon-bin")) {
-    binfmt = BINFMT_DRAGONBIN;
+  else if (!strcmp(p,"-atari-com")) {
+    binfmt = BINFMT_ATARICOM;
+    return 1;
+  }
+  else if (!strcmp(p,"-cbm-prg")) {
+    binfmt = BINFMT_CBMPRG;
     return 1;
   }
   else if (!strcmp(p,"-coco-ml")) {
     binfmt = BINFMT_COCOML;
+    return 1;
+  }
+  else if (!strcmp(p,"-dragon-bin")) {
+    binfmt = BINFMT_DRAGONBIN;
+    return 1;
+  }
+  else if (!strcmp(p,"-foenix-pgx")) {
+    binfmt = BINFMT_FOENIXPGX;
+    return 1;
+  }
+  else if (!strcmp(p,"-foenix-pgz")) {
+    binfmt = BINFMT_FOENIXPGZ;
     return 1;
   }
   else if (!strcmp(p,"-oric-mc")) {
@@ -270,6 +342,9 @@ int init_output_bin(char **cp,void (**wo)(FILE *,section *,symbol *),int (**oa)(
   *cp = copyright;
   *wo = write_output;
   *oa = output_args;
+  defsecttype = emptystr;  /* default section is "org 0" */
+  output_bitsperbyte = 1;  /* we do support BITSPERBYTE != 8 */
+  addrbits = bytespertaddr * BITSPERBYTE;
   return 1;
 }
 

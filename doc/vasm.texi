@@ -8,13 +8,13 @@
 @setfilename index.texi
 @settitle vasm manual
 @setchapternewpage odd
-@set UPDATED February 2022
+@set UPDATED December 2024
 
 @ifinfo
 
 This is the manual for the vasm assembler system.
 
-Copyright 2002-2022 Volker Barthelmann
+Copyright 2002-2024 Volker Barthelmann
 
 @end ifinfo
 
@@ -39,24 +39,27 @@ vasm is a portable and retargetable assembler able to create linkable
 objects in different formats as well as absolute code.
 Different CPU-, syntax and output-modules are supported.
 
-Many common directives/pseudo-opcodes are supported (depending on the
+Most common directives/pseudo-opcodes are supported (depending on the
 syntax module) as well as CPU-specific extensions.
 
-The assembler supports optimizations and relaxations (e.g. choosing
+The assembler supports optimizations and relaxations. For example, choosing
 the shortest possible branch instruction or addressing mode as well as
-converting a branch to an absolute jump if necessary).
+converting a branch to an absolute jump if necessary.
+
+It also supports target CPUs with more than 8 bits per byte
+(word-addressing) but requires that the host system has 8-bit bytes.
 
 The concept is that you get a special vasm binary for any combination of
 CPU- and syntax-module. All output modules, which make sense for the
-current CPU, are included in the vasm binary and you have to make sure to
+selected CPU, are included in the vasm binary and you have to make sure to
 choose the output file format you need (refer to the next chapter and look for
-the @code{-F} option). The default is a test output, only useful for debugging
-or analyzing the output.
+the @code{-F} option). The default is a test output format, only useful for
+debugging or analyzing the output.
 
 
 @section Legal
 
-    vasm is copyright in 2002-2022 by Volker Barthelmann.
+    vasm is copyright in 2002-2024 by Volker Barthelmann.
 
     This archive may be redistributed without modifications and used
     for non-commercial purposes.
@@ -70,6 +73,17 @@ or analyzing the output.
     Certain modules may fall under additional copyrights.
 
 
+@section Contact
+Responsible for the current version of vasm and contact address in
+case of bug reports or support requests:
+@itemize @minus
+  @item Volker Barthelmann (vb@@compilers.de)
+  @item Frank Wille (frank@@phoenix.owl.de)
+@end itemize
+In case you have an issue with a specific cpu-, syntax- or output-module,
+please contact the module's author first, if possible.
+
+
 @section Installation
 
 The vasm binaries do not need additional files, so no further
@@ -77,7 +91,7 @@ installation is necessary. To use vasm with vbcc, copy the
 binary to @file{vbcc/bin} after following the installation instructions
 for vbcc.
 
-The vasm binaries are named @code{vasm<cpu>_<syntax>} with 
+The vasm binaries are named @code{vasm<cpu>_<syntax>} with
 @code{<cpu>} representing the CPU-module and @code{<syntax>}
 the syntax-module, e.g. vasm for PPC with the standard syntax
 module is called @code{vasmppc_std}.
@@ -122,8 +136,12 @@ Detailed instructions how to build vasm can be found in the last chapter.
 @chapter TOS output module
 @include output_tos.texi
 
-@node Amiga output module
-@chapter Amiga output module
+@node GST output module
+@chapter GST output module
+@include output_gst.texi
+
+@node Hunk-format output module
+@chapter Hunk-format output module
 @include output_hunk.texi
 
 @node X68k output module
@@ -142,20 +160,32 @@ Detailed instructions how to build vasm can be found in the last chapter.
 @chapter Simple binary output module
 @include output_bin.texi
 
-@node Motorola srecord output module
-@chapter Motorola srecord output module
+@node Motorola S-Record output module
+@chapter Motorola S-Record output module
 @include output_srec.texi
 
-@node Intel hex output module
-@chapter Intel hex output module
+@node Intel Hex output module
+@chapter Intel Hex output module
 @include output_ihex.texi
 
 @node C #define output module
 @chapter C #define output module
 @include output_cdef.texi
 
-@node m68k cpu module
-@chapter m68k cpu module
+@node Project Hans custom output module
+@chapter Project Hans custom output module
+@include output_hans.texi
+
+@node Wozmon output module
+@chapter Wozmon output module
+@include output_woz.texi
+
+@node MOS paper tape output module
+@chapter MOS paper tape output module
+@include output_pap.texi
+
+@node M68k cpu module
+@chapter M68k cpu module
 @include cpu_m68k.texi
 
 @node PowerPC cpu module
@@ -178,8 +208,8 @@ Detailed instructions how to build vasm can be found in the last chapter.
 @chapter 80x86 cpu module
 @include cpu_x86.texi
 
-@node z80 cpu module
-@chapter z80 cpu module
+@node Z80 cpu module
+@chapter Z80 cpu module
 @include cpu_z80.texi
 
 @node 6800 cpu module
@@ -197,6 +227,14 @@ Detailed instructions how to build vasm can be found in the last chapter.
 @node PDP11 cpu module
 @chapter PDP11 cpu module
 @include cpu_pdp11.texi
+
+@node unSP cpu module
+@chapter unSP cpu module
+@include cpu_unsp.texi
+
+@node HANS cpu module
+@chapter HANS cpu module
+@include cpu_hans.texi
 
 @node Trillek TR3200 cpu module
 @chapter Trillek TR3200 cpu module

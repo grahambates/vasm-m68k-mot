@@ -1,12 +1,28 @@
-/* output_hunk.c AmigaOS hunk format output driver for vasm */
-/* (c) in 2002-2021 by Frank Wille */
+/* hunk.c AmigaOS hunk format output driver for vasm */
+/* (c) in 2002-2024 by Frank Wille */
 
 #include "vasm.h"
 #include "osdep.h"
 #include "output_hunk.h"
 #if defined(OUTHUNK) && (defined(VASM_CPU_M68K) || defined(VASM_CPU_PPC))
-static char *copyright="vasm hunk format output module 2.13a (c) 2002-2021 Frank Wille";
-int hunk_onlyglobal;
+static char *copyright="vasm hunk format output module 2.17e (c) 2002-2024 Frank Wille";
+int hunk_xdefonly,hunk_devpac;
+
+static uint32_t sec_cnt;
+static symbol **secsyms;
+
+/* options */
+static int databss;
+static int kick1;
+static int exthunk;
+static int genlinedebug;
+static int noabspath;
+static int keep_empty_sects;
+
+static int debug_symbols; /* HUNK_SYMBOL output options */
+#define DBGSYM_STD 0      /* global symbols only (default) */
+#define DBGSYM_LOCAL 1    /* + local symbols with their original name */
+#define DBGSYM_ULOCAL 2   /* + local symbols with a unique global$local name */
 
 /* (currently two-byte only) padding value for not 32-bit aligned code hunks */
 #ifdef VASM_CPU_M68K
@@ -15,17 +31,8 @@ static uint16_t hunk_pad = 0x4e71;
 static uint16_t hunk_pad = 0;
 #endif
 
-static int databss;
-static int kick1;
-static int exthunk;
-static int genlinedebug;
-static int keep_empty_sects;
 
-static uint32_t sec_cnt;
-static symbol **secsyms;
-
-
-static uint32_t strlen32(char *s)
+static uint32_t strlen32(const char *s)
 /* calculate number of 32 bit words required for
    a string without terminator */
 {
@@ -33,7 +40,7 @@ static uint32_t strlen32(char *s)
 }
 
 
-static void fwname(FILE *f,char *name)
+static void fwname(FILE *f,const char *name)
 {
   size_t n = strlen(name);
 
@@ -119,8 +126,12 @@ static section *prepare_sections(section *first_sec,symbol *sym)
 {
   section *sec,*first_nonbss;
   symbol *nextsym;
+  utaddr pc;
   rlist *rl;
   atom *a;
+
+  if (inname==NULL && genlinedebug)
+    genlinedebug = 0;  /* no line debug info when source is stdin */
 
   for (sec_cnt=0,sec=first_sec,first_nonbss=NULL; sec!=NULL; sec=sec->next) {
     /* ignore empty sections without symbols, unless -keepempty was given */
@@ -136,11 +147,16 @@ static section *prepare_sections(section *first_sec,symbol *sym)
     if (first_nonbss==NULL && scan_attr(sec)!=HUNK_BSS)
       first_nonbss = sec;
 
-    /* flag all present common-symbol references from this section */
-    for (a=sec->first; a; a=a->next) {
-      if (a->type == DATA) {
-        for (rl=a->content.db->relocs; rl; rl=rl->next) {
-          if (rl->type==REL_ABS || rl->type==REL_PC) {
+    for (a=sec->first,pc=sec->org; a; a=a->next) {
+      pc = pcalign(a,pc);
+
+      if (a->type==DATA || a->type==SPACE) {
+        for (rl=a->type==DATA?a->content.db->relocs:a->content.sb->relocs;
+             rl; rl=rl->next) {
+          int rtype = std_reloc(rl);
+
+          if (rtype==REL_ABS || rtype==REL_PC) {
+            /* flag all present common-symbol references from this section */
             if (((nreloc *)rl->reloc)->size==32) {
               symbol *s = ((nreloc *)rl->reloc)->sym;
 
@@ -148,8 +164,26 @@ static section *prepare_sections(section *first_sec,symbol *sym)
                 s->flags |= COMM_REFERENCED;
             }
           }
+
+          else if (rtype==REL_NONE && !exec_out) {
+            /* warn about unsupported NONE-relocations and convert them into
+               8-bit ABS, hoping to find a non-destructive definition... */
+            nreloc *r = (nreloc *)rl->reloc;
+
+            if (pc < (utaddr)sec->pc) {
+              r->byteoffset = r->bitoffset = 0;
+              r->size = 8;
+              r->mask = DEFMASK;
+              r->addend = 0;
+              rl->type = REL_ABS;
+              output_error(16,r->sym->name);  /* conversion warning */
+            }
+            else
+              output_error(17,r->sym->name);  /* no space for conversion */
+          }
         }
       }
+      pc += atom_size(a,sec,pc);
     }
   }
 
@@ -162,7 +196,7 @@ static section *prepare_sections(section *first_sec,symbol *sym)
   while (sym != NULL) {
     nextsym = sym->next;
 
-    if (*sym->name != ' ') {  /* internal symbols will be ignored */
+    if (!(sym->flags & VASMINTERN)) {  /* internal symbols will be ignored */
       if ((sym->flags & COMMON) && !(sym->flags & COMM_REFERENCED)) {
         /* create a dummy reference for each unreferenced common symbol */
         dblock *db = new_dblock();
@@ -306,21 +340,24 @@ static utaddr sect_size(section *sec)
 }
 
 
-static struct hunkreloc *convert_reloc(rlist *rl,utaddr pc)
+static struct hunkreloc *convert_reloc(atom *a,rlist *rl,utaddr pc)
 {
-  nreloc *r = (nreloc *)rl->reloc;
+  int rtype = std_reloc(rl);
 
-  if (rl->type <= LAST_STANDARD_RELOC
 #if defined(VASM_CPU_PPC)
-      || rl->type==REL_PPCEABI_SDA2
+  if (rtype<0 && rl->type>=FIRST_CPU_RELOC && rl->type<=LAST_CPU_RELOC)
+    rtype = rl->type;
 #endif
-     ) {
+
+  if (rtype >= 0) {
+    nreloc *r = (nreloc *)rl->reloc;
+
     if (LOCREF(r->sym)) {
       struct hunkreloc *hr;
       uint32_t type;
       uint32_t offs = pc + r->byteoffset;
 
-      switch (rl->type) {
+      switch (rtype) {
         case REL_ABS:
           if (r->size!=32 || r->bitoffset!=0 || r->mask!=DEFMASK)
             return NULL;
@@ -336,7 +373,7 @@ static struct hunkreloc *convert_reloc(rlist *rl,utaddr pc)
               break;
 #if defined(VASM_CPU_PPC)
             case 14:
-              if (r->bitoffset!=0 || r->mask!=0xfffc)
+              if (r->bitoffset!=0 || r->mask!=~3)
                 return NULL;
               type = HUNK_RELRELOC16;
               break;
@@ -348,7 +385,7 @@ static struct hunkreloc *convert_reloc(rlist *rl,utaddr pc)
               break;
 #if defined(VASM_CPU_PPC)
             case 24:
-              if (r->bitoffset!=6 || r->mask!=0x3fffffc)
+              if (r->bitoffset!=6 || r->mask!=~3)
                 return NULL;
               type = HUNK_RELRELOC26;
               break;
@@ -375,6 +412,7 @@ static struct hunkreloc *convert_reloc(rlist *rl,utaddr pc)
       }
 
       hr = mymalloc(sizeof(struct hunkreloc));
+      hr->a = a;
       hr->rl = rl;
       hr->hunk_id = type;
       hr->hunk_offset = offs;
@@ -389,20 +427,23 @@ static struct hunkreloc *convert_reloc(rlist *rl,utaddr pc)
 
 static struct hunkxref *convert_xref(rlist *rl,utaddr pc)
 {
-  nreloc *r = (nreloc *)rl->reloc;
+  int rtype = std_reloc(rl);
 
-  if (rl->type <= LAST_STANDARD_RELOC
 #if defined(VASM_CPU_PPC)
-      || rl->type==REL_PPCEABI_SDA2
+  if (rtype<0 && rl->type>=FIRST_CPU_RELOC && rl->type<=LAST_CPU_RELOC)
+    rtype = rl->type;
 #endif
-     ) {
+
+  if (rtype >= 0) {
+    nreloc *r = (nreloc *)rl->reloc;
+
     if (EXTREF(r->sym)) {
       struct hunkxref *xref;
       uint32_t type,size=0;
       uint32_t offs = pc + r->byteoffset;
       int com = (r->sym->flags & COMMON) != 0;
 
-      switch (rl->type) {
+      switch (rtype) {
         case REL_ABS:
           if (r->bitoffset!=0 || r->mask!=DEFMASK || (com && r->size!=32))
             return NULL;
@@ -433,7 +474,7 @@ static struct hunkxref *convert_xref(rlist *rl,utaddr pc)
               break;
 #if defined(VASM_CPU_PPC)
             case 14:
-              if (r->bitoffset!=0 || r->mask!=0xfffc || com)
+              if (r->bitoffset!=0 || r->mask!=~3 || com)
                 return NULL;
               type = EXT_RELREF16;
               break;
@@ -445,7 +486,7 @@ static struct hunkxref *convert_xref(rlist *rl,utaddr pc)
               break;
 #if defined(VASM_CPU_PPC)
             case 24:
-              if (r->bitoffset!=6 || r->mask!=0x3fffffc || com)
+              if (r->bitoffset!=6 || r->mask!=~3 || com)
                 return NULL;
               type = EXT_RELREF26;
               break;
@@ -493,36 +534,34 @@ static void process_relocs(atom *a,struct list *reloclist,
                            struct list *xreflist,section *sec,utaddr pc)
 /* convert an atom's rlist into relocations and xrefs */
 {
-  rlist *rl;
-
-  if (a->type == DATA)
-    rl = a->content.db->relocs;
-  else if (a->type == SPACE)
-    rl = a->content.sb->relocs;
-  else
-    return;
+  rlist *rl = get_relocs(a);
 
   if (rl == NULL)
     return;
 
   do {
-    struct hunkreloc *hr = convert_reloc(rl,pc);
+    struct hunkreloc *hr = convert_reloc(a,rl,pc);
 
     if (hr!=NULL && (xreflist!=NULL || hr->hunk_id==HUNK_ABSRELOC32 ||
                      hr->hunk_id==HUNK_RELRELOC32)) {
       addtail(reloclist,&hr->n);       /* add new relocation */
+      if ((hr->hunk_offset&1) && ((nreloc *)rl->reloc)->size > 8)
+        output_atom_error(22,a,sec->name,(unsigned long)hr->hunk_offset);
     }
     else {
       struct hunkxref *xref = convert_xref(rl,pc);
 
       if (xref) {
-        if (xreflist)
+        if (xreflist) {
           addtail(xreflist,&xref->n);  /* add new external reference */
+          if ((xref->offset&1) && ((nreloc *)rl->reloc)->size > 8)
+            output_atom_error(22,a,sec->name,(unsigned long)xref->offset);
+        }
         else
           output_atom_error(8,a,xref->name,sec->name,xref->offset,rl->type);
       }
       else
-        unsupp_reloc_error(rl);  /* reloc not supported */
+        unsupp_reloc_error(a,rl);  /* reloc not supported */
     }
   }
   while (rl = rl->next);
@@ -532,61 +571,75 @@ static void process_relocs(atom *a,struct list *reloclist,
 static void reloc_hunk(FILE *f,uint32_t type,int shrt,struct list *reloclist)
 /* write all section-offsets for one relocation type */
 {
-  int bytes = 0;
+  unsigned long bytes = 0;
   uint32_t idx;
 
   for (idx=0; idx<sec_cnt; idx++) {
+    struct list myreloclist;
     struct hunkreloc *r,*next;
-    uint32_t n;
-    int off16;
+    unsigned long cnt,n;
 
-    for (r=(struct hunkreloc *)reloclist->first,n=0,off16=1;
-         r->n.next; r=(struct hunkreloc *)r->n.next) {
-      if (r->hunk_id==type && r->hunk_index==idx) {
-        n++;
-        if (r->hunk_offset >= 0x10000)
-          off16 = 0;
+    /* move appropriate relocs into the list for this hunk */
+    initlist(&myreloclist);
+    cnt = 0;
+
+    r = (struct hunkreloc *)reloclist->first;
+    while (next = (struct hunkreloc *)r->n.next) {
+      if (r->hunk_id==type && r->hunk_index==idx &&
+          (!shrt || r->hunk_offset < 0x10000)) {
+        remnode(&r->n);
+        addtail(&myreloclist,&r->n);
+        cnt++;
       }
+      r = next;
     }
-    if (shrt && (n>=0x10000 || off16==0))
-      continue;  /* relocs for this hunk don't fit into 16-bit entries */
-    if (n > 0) {
-      if (bytes == 0) {
+
+    if (cnt) {
+      /* output hunk-id, before the first reloc */
+      if (!bytes) {
         if (shrt && type==HUNK_ABSRELOC32)
           fw32(f,HUNK_DREL32,1);  /* RELOC32SHORT is DREL32 for OS2.0 */
         else
           fw32(f,type,1);
         bytes = 4;
       }
+
       if (shrt) {
-        fw16(f,n,1);
-        fw16(f,idx,1);
-        bytes += 4;
-      }
-      else {
-        fw32(f,n,1);
-        fw32(f,idx,1);
-        bytes += 8;
-      }
-      r = (struct hunkreloc *)reloclist->first;
-      while (next = (struct hunkreloc *)r->n.next) {
-        if (r->hunk_id==type && r->hunk_index==idx) {
-          if (shrt) {
+        /* output up to 65535 short relocs with unsigned 16-bit offsets */
+        while (n = cnt) {
+          if (n > 0xffff)
+            n = 0xffff;  /* maximum entries for short relocs */
+          fw16(f,n,1);   /* number of relocations */
+          fw16(f,idx,1); /* referenced section index */
+          cnt -= n;
+  
+          while (n-- && (r=(struct hunkreloc *)remhead(&myreloclist))) {
             fw16(f,r->hunk_offset,1);
             bytes += 2;
+            myfree(r);
           }
-          else {
-            fw32(f,r->hunk_offset,1);
-            bytes += 4;
-          }
-          remnode(&r->n);
-          myfree(r);
         }
-        r = next;
+      }
+      else {
+        /* output up to 65536 normal relocs with 32-bit offsets */
+        while (n = cnt) {
+          if (exec_out && n>0x10000)
+            n = 0x10000; /* limitation from AmigaDOS LoadSeg() */
+          fw32(f,n,1);   /* number of relocations */
+          fw32(f,idx,1); /* referenced section index */
+          cnt -= n;
+
+          while (n-- && (r=(struct hunkreloc *)remhead(&myreloclist))) {
+            fw32(f,r->hunk_offset,1);
+            myfree(r);
+          }
+        }
       }
     }
   }
+
   if (bytes) {
+    /* no more relocation entries for this hunk - output terminating zero */
     if (shrt) {
       fw16(f,0,1);
       fwalign(f,bytes+2,4);
@@ -620,7 +673,7 @@ static void add_linedebug(struct list *ldblist,source *src,int line,
 
     pathbuf[0] = '\0';
     if (src->srcfile->incpath != NULL) {
-      if (src->srcfile->incpath->compdir_based)
+      if (src->srcfile->compdir_based)
         strcpy(pathbuf,compile_dir);
       strcat(pathbuf,src->srcfile->incpath->path);
     }
@@ -643,12 +696,15 @@ static void add_linedebug(struct list *ldblist,source *src,int line,
   else
     ldbblk = (struct linedb_block *)ldblist->last;
 
-  /* append line/offset pair as a new entry for the debug block */
-  ldbent = mymalloc(sizeof(struct linedb_entry));
-  ldbent->line = (uint32_t)line;
-  ldbent->offset = off - ldbblk->offset;
-  addtail(&ldbblk->lines,&ldbent->n);
-  ldbblk->entries++;
+  ldbent = (struct linedb_entry *)ldbblk->lines.last;
+  if (ldbent->n.pred==NULL || (int)ldbent->line!=line) {
+    /* append line/offset pair as a new entry for the debug block */
+    ldbent = mymalloc(sizeof(struct linedb_entry));
+    ldbent->line = (uint32_t)line;
+    ldbent->offset = off - ldbblk->offset;
+    addtail(&ldbblk->lines,&ldbent->n);
+    ldbblk->entries++;
+  }
 }
 
 
@@ -662,7 +718,7 @@ static void linedebug_hunk(FILE *f,struct list *ldblist)
     uint32_t abspathlen;
 
     /* get source file name as full absolute path */
-    if (!abs_path(ldbblk->filename)) {
+    if (!noabspath && !abs_path(ldbblk->filename)) {
       char *cwd = append_path_delimiter(get_workdir());
 
       if (strlen(cwd) + strlen(ldbblk->filename) < MAXPATHLEN)
@@ -721,7 +777,7 @@ static void ext_refs(FILE *f,struct list *xreflist)
   while (xreflist->first->next) {
     struct hunkxref *x,*next;
     uint32_t n,type,size;
-    char *name;
+    const char *name;
 
     extheader(f);
     x = (struct hunkxref *)xreflist->first;
@@ -758,9 +814,23 @@ static void ext_defs(FILE *f,int symtype,int global,size_t idx,
 {
   int header = 0;
   symbol *sym;
+  uint32_t len;
 
   for (sym=secsyms[idx]; sym; sym=sym->next) {
-    if (sym->type==symtype && (sym->flags&global)==global) {
+    if (sym->type==symtype && (sym->flags&global)==global &&
+        (*sym->name!=' ' || (xtype==EXT_SYMB && debug_symbols!=DBGSYM_STD))) {
+      char *sname,*p=NULL;
+
+      if (is_local_symbol_name(sym->name) && debug_symbols==DBGSYM_ULOCAL &&
+          (p=strchr(sym->name+1,' '))!=NULL) {
+        /* make a unique label name from <globalname>$<localname> */
+        sname = mymalloc((p-(sym->name+1))+strlen(real_symbol_name(sym))+2);
+        sprintf(sname,"%-.*s$%s",
+                (int)(p-(sym->name+1)),sym->name+1,real_symbol_name(sym));
+      }
+      else
+        sname = (char *)real_symbol_name(sym);
+
       if (!header) {
         header = 1;
         if (xtype == EXT_SYMB)
@@ -768,9 +838,20 @@ static void ext_defs(FILE *f,int symtype,int global,size_t idx,
         else
           extheader(f);
       }
-      fw32(f,(xtype<<24) | strlen32(sym->name),1);
-      fwname(f,sym->name);
+
+      len = strlen32(sname);
+      if (exec_out && len>31) {
+        /* LoadSeg() doesn't allow names with more than 31 longwords */
+        fw32(f,(xtype<<24)|31,1);
+        fwdata(f,sname,124);
+      }
+      else {
+        fw32(f,(xtype<<24)|len,1);
+        fwname(f,sname);
+      }
       fw32(f,(uint32_t)get_sym_value(sym),1);
+      if (p)
+        myfree(sname);
     }
   }
   if (header && xtype==EXT_SYMB)
@@ -785,7 +866,17 @@ static void report_bad_relocs(struct list *reloclist)
   /* report all remaining relocs in the list as unsupported */
   for (r=(struct hunkreloc *)reloclist->first; r->n.next;
        r=(struct hunkreloc *)r->n.next)
-    unsupp_reloc_error(r->rl);  /* reloc not supported */
+    unsupp_reloc_error(r->a,r->rl);  /* reloc not supported */
+}
+
+
+static uint32_t hunk_size(section *sec)
+{
+  uint64_t sz = get_sec_size(sec);
+
+  if (sz > 0xfffffffc)
+    output_error(23,sec->name,0xfffffffcULL,(unsigned long long)sz);
+  return (sz+3) >> 2;
 }
 
 
@@ -825,7 +916,7 @@ static void write_object(FILE *f,section *sec,symbol *sym)
           type = HUNK_DATA;  /* default */
         }
         fwmemflags(f,sec,type);
-        fw32(f,(get_sec_size(sec)+3)>>2,1);  /* size */
+        fw32(f,hunk_size(sec),1);  /* size */
 
         if (type != HUNK_BSS) {
           /* write contents */
@@ -853,6 +944,19 @@ static void write_object(FILE *f,section *sec,symbol *sym)
           else
             fwalign(f,pc,4);
         }
+        else {
+          /* only process line-debug information in BSS, if present */
+          utaddr pc;
+
+          for (pc=0,a=sec->first; a; a=a->next) {
+            pc += balign(pc,a->align);
+            if (genlinedebug && !hunk_devpac && a->type==SPACE)
+              add_linedebug(&linedblist,a->src,a->line,pc);
+            else if (a->type == LINE)
+              add_linedebug(&linedblist,NULL,a->content.srcline,pc);
+            pc += atom_size(a,sec,pc);
+          }
+        }
 
         /* relocation hunks */
         reloc_hunk(f,HUNK_ABSRELOC32,0,&reloclist);
@@ -873,8 +977,7 @@ static void write_object(FILE *f,section *sec,symbol *sym)
 
         if (!no_symbols) {
           /* symbol table */
-          if (!hunk_onlyglobal)
-            ext_defs(f,LABSYM,0,sec->idx,EXT_SYMB);
+          ext_defs(f,LABSYM,hunk_xdefonly?XDEF:0,sec->idx,EXT_SYMB);
           /* line-debug */
           linedebug_hunk(f,&linedblist);
         }
@@ -913,7 +1016,7 @@ static void write_exec(FILE *f,section *sec,symbol *sym)
     /* write section sizes and memory flags */
     for (s=sec; s; s=s->next) {
       if (!(s->flags & SEC_DELETED))
-        fwmemflags(f,s,(get_sec_size(s)+3)>>2);
+        fwmemflags(f,s,hunk_size(s));
     }
 
     /* section hunk loop */
@@ -939,30 +1042,46 @@ static void write_exec(FILE *f,section *sec,symbol *sym)
 
           size = databss ? file_size(sec) : sect_size(sec);
           fw32(f,(size+3)>>2,1);
-          for (a=sec->first,pc=0; a!=NULL&&pc<size; a=a->next) {
-            npc = fwpcalign(f,a,sec,pc);
+          for (a=sec->first,pc=0; a; a=a->next) {
+            npc = pc<size ? fwpcalign(f,a,sec,pc) : pcalign(a,pc);
 
             if (genlinedebug && (a->type==DATA || a->type==SPACE))
               add_linedebug(&linedblist,a->src,a->line,npc);
 
-            if (a->type == DATA)
+            if (a->type==DATA && pc<size)
               fwdata(f,a->content.db->data,a->content.db->size);
-            else if (a->type == SPACE)
+            else if (a->type==SPACE && pc<size)
               fwsblock(f,a->content.sb);
-            else if (a->type == LINE && !genlinedebug)
+            else if (a->type==LINE && !genlinedebug)
               add_linedebug(&linedblist,NULL,a->content.srcline,npc);
 
             process_relocs(a,&reloclist,NULL,sec,npc);
 
             pc = npc + atom_size(a,sec,npc);
           }
-          if (type == HUNK_CODE && (pc&1) == 0 && a == NULL)
-            fwnopalign(f,pc);
+          if (type == HUNK_CODE && (size&1) == 0 && a == NULL)
+            fwnopalign(f,size);
           else
-            fwalign(f,pc,4);
+            fwalign(f,size,4);
         }
-        else /* HUNK_BSS */
-          fw32(f,(get_sec_size(sec)+3)>>2,1);
+        else {
+          /* HUNK_BSS */
+          uint32_t len = hunk_size(sec);
+          utaddr pc;
+
+          if (kick1 && len > 0x10000)
+            output_error(18,sec->name);  /* warn about kickstart 1.x bug */
+          fw32(f,len,1);
+
+          for (pc=0,a=sec->first; a; a=a->next) {
+            pc += balign(pc,a->align);
+            if (genlinedebug && !hunk_devpac && a->type==SPACE)
+              add_linedebug(&linedblist,a->src,a->line,pc);
+            else if (a->type == LINE)
+              add_linedebug(&linedblist,NULL,a->content.srcline,pc);
+            pc += atom_size(a,sec,pc);
+          }
+        }
 
         if (!kick1)
           reloc_hunk(f,HUNK_ABSRELOC32,1,&reloclist);
@@ -973,8 +1092,7 @@ static void write_exec(FILE *f,section *sec,symbol *sym)
 
         if (!no_symbols) {
           /* symbol table */
-          if (!hunk_onlyglobal)
-            ext_defs(f,LABSYM,0,sec->idx,EXT_SYMB);
+          ext_defs(f,LABSYM,hunk_xdefonly?XDEF:0,sec->idx,EXT_SYMB);
           /* line-debug */
           linedebug_hunk(f,&linedblist);
         }
@@ -1014,6 +1132,18 @@ static int common_args(char *p)
 #endif
   if (!strcmp(p,"-linedebug")) {
     genlinedebug = 1;
+    return 1;
+  }
+  if (!strcmp(p,"-dbg-local")) {
+    debug_symbols = DBGSYM_LOCAL;
+    return 1;
+  }
+  if (!strcmp(p,"-dbg-globloc")) {
+    debug_symbols = DBGSYM_ULOCAL;
+    return 1;
+  }
+  if (!strcmp(p,"-noabspath")) {
+    noabspath = 1;
     return 1;
   }
   if (!strcmp(p,"-keepempty")) {

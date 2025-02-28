@@ -18,7 +18,7 @@
 #define REC_ELA 4 /* extended linear address */
 #define REC_SLA 5 /* start linear address */
 
-static char *copyright = "vasm Intel HEX output module 0.2 (c) 2020 Rida Dzhaafar";
+static char *copyright = "vasm Intel HEX output module 0.3 (c) 2020 Rida Dzhaafar";
 
 static int ihex_fmt = I8HEX; /* default ihex format */
 
@@ -74,10 +74,12 @@ static void write_data_record(FILE *f)
   /* pre-flight checks */
   if (buffer_i == 0)
     return;
-  if (ihex_fmt == I8HEX && addr > UINT16_MAX)
-    output_error(11, addr);
-  if (ihex_fmt == I16HEX && addr > MEBIBYTE)
-    output_error(11, addr);
+  /* addr points to the next inserted byte
+     addr-1 is the last one written */
+  if (ihex_fmt == I8HEX && addr-1 > UINT16_MAX)
+    output_error(11, addr-1);
+  if (ihex_fmt == I16HEX && addr-1 > MEBIBYTE)
+    output_error(11, addr-1);
   
   start = addr - buffer_i;
   ext = start >> 16;
@@ -115,22 +117,33 @@ static void buffer_data(FILE *f, uint8_t b)
     write_data_record(f);
 }
 
-/* align the atom if necessary
-   adapted from output_srec.c */
-static void align(FILE *f, section *sec, atom *a)
+static void buffer_byte(FILE *f, void *byte)
 {
-  uint32_t align = balign(addr, a->align);
-  uint32_t i;
-  uint32_t len;
+  uint8_t *p = byte;
+  int i;
+
+  if (output_bytes_le)
+    for (i = octetsperbyte; i > 0; buffer_data(f, p[--i]));
+  else
+    for (i = 0; i < octetsperbyte; buffer_data(f, p[i++]));
+}
+
+/* align the atom if necessary
+   adapted from support.c fwpcalign/fwpattern */
+static taddr mypcalign(FILE *f, section *sec, atom *a, taddr pc)
+{
+  size_t align = balign(pc, a->align);
+  int i;
+  size_t len;
   uint8_t *fill;
 
   if (!align)
-    return;
+    return pc;
 
   if (a->type == SPACE && a->content.sb->space == 0) {
     if (a->content.sb->maxalignbytes != 0 &&
         align > a->content.sb->maxalignbytes)
-      return;
+      return pc;
     fill = a->content.sb->fill;
     len = a->content.sb->size;
   } else {
@@ -138,28 +151,34 @@ static void align(FILE *f, section *sec, atom *a)
     len = sec->padbytes;
   }
 
+  pc += align;
+
   while (align % len) {
-    buffer_data(f, 0);
+    for (i = 0; i < octetsperbyte; i++)
+      buffer_data(f, 0);
     align--;
   }
 
   while (align >= len) {
-    for(i = 0; i < len; i++) {
-      buffer_data(f, fill[i]);
+    for (i = 0; i < len; i++) {
+      buffer_byte(f, fill+OCTETS(i));
       align--;
     }
   }
 
-  while (len--) {
-    buffer_data(f, 0);
+  while (align--) {
+    for (i = 0; i < octetsperbyte; i++)
+      buffer_data(f, 0);
   }
+  return pc;
 }
 
 static void write_output(FILE *f, section *sec, symbol *sym)
 {
-  uint32_t i, j;
+  int i, j;
+  taddr pc;
   atom *a;
-  section *s, *s2;
+  section *s;
 
   if (!sec)
     return;
@@ -168,32 +187,23 @@ static void write_output(FILE *f, section *sec, symbol *sym)
     if (sym->type == IMPORT)
       output_error(6, sym->name); /* undefined symbol (sym->name) */
   
-  /* fail on overlapping sections
-     adapted from output_bin.c */
-  for (s = sec; s != NULL; s = s->next) {
-    for (s2 = s->next; s2; s2 = s2->next) {
-      if (((ULLTADDR(s2->org) >= ULLTADDR(s->org) &&
-            ULLTADDR(s2->org) < ULLTADDR(s->pc)) ||
-           (ULLTADDR(s2->pc) > ULLTADDR(s->org) &&
-            ULLTADDR(s2->pc) <= ULLTADDR(s->pc))))
-        output_error(0);
-    }
-  }
+  chk_sec_overlap(sec); /* fail on overlapping sections */
 
   buffer = mymalloc(sizeof(uint8_t) * buffer_s);
 
   for (s = sec; s; s = s->next) {
-    addr = ULLTADDR(s->org);
+    pc = s->org;
+    addr = pc * octetsperbyte;
     for (a = s->first; a; a = a->next) {
-      align(f, s, a);
+      pc = mypcalign(f, s, a, pc);
       if (a->type == DATA) {
-        for (i = 0; i < a->content.db->size; i++) {
-          buffer_data(f, a->content.db->data[i]);
+        for (i = 0; i < a->content.db->size; i++,pc++) {
+          buffer_byte(f, a->content.db->data+OCTETS(i));
         }
       } else if (a->type == SPACE) {
         for (i = 0; i < a->content.sb->space; i++) {
-          for (j = 0; j < a->content.sb->size; j++) {
-            buffer_data(f, a->content.sb->fill[j]);
+          for (j = 0; j < a->content.sb->size; j++,pc++) {
+            buffer_byte(f, a->content.sb->fill+OCTETS(j));
           }
         }
       }
@@ -239,15 +249,12 @@ static int parse_args(char *arg)
 
 int init_output_ihex(char **cp, void (**wo)(FILE *, section *, symbol *), int (**oa)(char *))
 {
-  if (sizeof(utaddr) > sizeof(uint32_t) || bitsperbyte != 8) {
-    output_error(1, cpuname); /* output module doesn't support (cpuname) */
-    return 0;
-  }
-  
   *cp = copyright;
   *wo = write_output;
   *oa = parse_args;
-  asciiout=1;
+  asciiout = 1;
+  output_bitsperbyte = 1;  /* we do support BITSPERBYTE != 8 */
+  defsecttype = emptystr;  /* default section is "org 0" */
   return 1;
 }
 

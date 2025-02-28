@@ -1,5 +1,5 @@
 /* atom.c - atomic objects from source */
-/* (c) in 2010-2020 by Volker Barthelmann and Frank Wille */
+/* (c) in 2010-2023 by Volker Barthelmann and Frank Wille */
 
 #include "vasm.h"
 
@@ -7,7 +7,8 @@
 /* searches mnemonic list and tries to parse (via the cpu module)
    the operands according to the mnemonic requirements; returns an
    instruction or 0 */
-instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
+instruction *new_inst(const char *inst,int len,
+                      int op_cnt,char **op,int *op_len)
 {
 #if MAX_OPERANDS!=0
   operand ops[MAX_OPERANDS];
@@ -15,12 +16,10 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
 #endif
   int i,inst_found=0;
   hashdata data;
+  mnemonic *mnemo;
   instruction *new;
+  static strbuf buf;
 
-  new = mymalloc(sizeof(*new));
-#if HAVE_INSTRUCTION_EXTENSION
-  init_instruction_ext(&new->ext);
-#endif
 #if MAX_OPERANDS!=0 && CLEAR_OPERANDS_ON_START!=0
   /* reset operands to allow the cpu-backend to parse them only once */
   memset(ops,0,sizeof(ops));
@@ -32,6 +31,8 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
     /* try all mnemonics with the same name until operands match */
     do {
       inst_found = 1;
+      mnemo = &mnemonics[i];
+
       if (!MNEMONIC_VALID(i)) {
         i++;
         continue;  /* try next */
@@ -39,16 +40,16 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
 
 #if MAX_OPERANDS!=0
 
-#if CLEAR_OPERANDS_ON_MNEMO!=0
-  /* reset all operands for every new mnemonic */
-  memset(ops,0,sizeof(ops));
+#if CLEAR_OPERANDS_ON_MNEMO
+      /* reset all operands for every new mnemonic */
+      memset(ops,0,sizeof(ops));
 #endif
 
 #if 0 /* @@@ was ALLOW_EMPTY_OPS */
       mnemo_opcnt = op_cnt<MAX_OPERANDS ? op_cnt : MAX_OPERANDS;
 #else
       for (j=0; j<MAX_OPERANDS; j++)
-        if (mnemonics[i].operand_type[j] == 0)
+        if (mnemo->operand_type[j] == 0)
           break;
       mnemo_opcnt = j;	/* number of expected operands for this mnemonic */
 #endif
@@ -58,7 +59,7 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
       for (j=k=omitted=skipped=0,again=-1; j<mnemo_opcnt; j++) {
 
         if (op_cnt+omitted < mnemo_opcnt &&
-            OPERAND_OPTIONAL(&ops[j],mnemonics[i].operand_type[j])) {
+            OPERAND_OPTIONAL(&ops[j],mnemo->operand_type[j])) {
           omitted++;
         }
         else {
@@ -67,23 +68,21 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
           if (k >= op_cnt) {
             /* we may be missing mandatory operands */
             if (j == again)
-              j++;  /* but probably not after PO_AGAIN */
+              j++;  /* but probably not after PO_COMB_OPT */
             break;
           }
 
-          rc = parse_operand(op[k],op_len[k],&ops[j],
-                             mnemonics[i].operand_type[j]);
+          rc = parse_operand(op[k],op_len[k],&ops[j],mnemo->operand_type[j]);
 
           if (rc == PO_CORRUPT) {
             /* operand has errors and will never match */
-            myfree(new);
             restore_symbols();
             return 0;
           }
           if (rc == PO_NOMATCH)
             break;     /* operand type does not match */
           if (rc == PO_NEXT)
-            continue;  /* after PO_AGAIN: use this arg. on the next operand */
+            continue;  /* after PO_COMB_OPT: use this arg. on next operand */
 
           /* MATCH, proceed to next parsed operand */
           k++;
@@ -92,8 +91,12 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
             j++;
             skipped++;
           }
-          else if (rc == PO_AGAIN) {
-            /* try to work on the same operand again with next arg. */
+          else if (rc == PO_COMB_REQ) {
+            /* work on same operand again, with a required next argument */
+            j--;
+          }
+          else if (rc == PO_COMB_OPT) {
+            /* work on same operand again, with an optional next argument */
             again = j--;
           }
         }
@@ -107,7 +110,11 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
         continue;
       }
 
-      /* Matched! Copy operands. */
+      /* Matched! Create instruction and copy operands. */
+      new = mymalloc(sizeof(*new));
+#if HAVE_INSTRUCTION_EXTENSION
+      init_instruction_ext(&new->ext);
+#endif
       mnemo_opcnt -= skipped;
       for (j=0; j<mnemo_opcnt; j++) {
         new->op[j] = mymalloc(sizeof(operand));
@@ -121,8 +128,7 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
       new->code = i;
       return new;
     }
-    while (i<mnemonic_cnt && !strnicmp(mnemonics[i].name,inst,len)
-           && mnemonics[i].name[len]==0);
+    while (i<mnemonic_cnt && mnemonics[i].name==mnemo->name);
   }
 
   switch (inst_found) {
@@ -133,11 +139,10 @@ instruction *new_inst(char *inst,int len,int op_cnt,char **op,int *op_len)
       general_error(0);  /* illegal operand types */
       break;
     default:
-      general_error(1,cnvstr(inst,len));  /* completely unknown mnemonic */
+      general_error(1,cutstr(&buf,inst,len)); /* completely unknown mnemonic */
       break;
   }
-  myfree(new);
-  return 0;
+  return NULL;
 }
 
 
@@ -190,7 +195,7 @@ sblock *new_sblock(expr *space,size_t size,expr *fill)
   sb->space_exp = space;
   sb->size = size;
   if (!(sb->fill_exp = fill))
-    memset(sb->fill,space_init,MAXPADBYTES);
+    memset(sb->fill,space_init,MAXPADSIZE);
   sb->relocs = 0;
   sb->maxalignbytes = 0;
   sb->flags = 0;
@@ -208,7 +213,7 @@ static size_t space_size(sblock *sb,section *sec,taddr pc)
     general_error(30);  /* expression must be constant */
 
   if (final_pass && sb->fill_exp) {
-    if (sb->size <= sizeof(taddr)) {
+    if (OCTETS(sb->size) <= sizeof(taddr)) {
       /* space is filled with an expression which may also need relocations */
       symbol *base=NULL;
       taddr fill;
@@ -221,9 +226,16 @@ static size_t space_size(sblock *sb,section *sec,taddr pc)
       copy_cpu_taddr(sb->fill,fill,sb->size);
       if (base && !sb->relocs) {
         /* generate relocations */
-        for (i=0; i<space; i++)
-          add_extnreloc(&sb->relocs,base,fill,REL_ABS,
-                        0,sb->size*bitsperbyte,sb->size*i);
+        if (sb->size) {
+          for (i=0; i<space; i++)
+            add_extnreloc(&sb->relocs,base,fill,REL_ABS,
+                          0,sb->size*BITSPERBYTE,sb->size*i);
+        }
+        else {
+          /* xrefs with size zero usually come from a "symdepend" directive */
+          add_extnreloc(&sb->relocs,base,0,REL_NONE,0,0,0);
+          base->flags |= EXPORT;  /* symdepend has an implicit xref */
+        }
       }
     }
     else
@@ -236,26 +248,16 @@ static size_t space_size(sblock *sb,section *sec,taddr pc)
 
 static size_t roffs_size(reloffs *roffs,section *sec,taddr pc)
 {
-  taddr offs;
+  utaddr offs;
 
-  eval_expr(roffs->offset,&offs,sec,pc);
-  offs = sec->org + offs - pc;
-  return offs>0 ? offs : 0;
+  eval_expr(roffs->offset,(taddr *)&offs,sec,pc);
+  return ((utaddr)sec->org + offs > (utaddr)pc) ?
+         (utaddr)sec->org + offs - (utaddr)pc : 0;
 }
 
 
-/* adds an atom to the specified section; if sec==0, the current
-   section is used */
-void add_atom(section *sec,atom *a)
+static void internal_add_atom(section *sec,atom *a)
 {
-  if (!sec) {
-    sec = default_section();
-    if (!sec) {
-      general_error(3);
-      return;
-    }
-  }
-
   a->changes = 0;
   a->src = cur_src;
   a->line = cur_src!=NULL ? cur_src->line : 0;
@@ -292,6 +294,31 @@ void add_atom(section *sec,atom *a)
 }
 
 
+/* adds an atom to the specified section;
+   if sec==0, the current section is used;
+   if the current section doesn't exist, then a default section is created */
+void add_atom(section *sec,atom *a)
+{
+  if (!sec) {
+    sec = default_section();
+    if (!sec) {
+      general_error(3);
+      return;
+    }
+  }
+  internal_add_atom(sec,a);
+}
+
+
+/* like add_atom(), but intermediately stores atoms in container_section,
+   when there is not yet a current_section */
+void add_or_save_atom(atom *a)
+{
+  section *sec = current_section ? current_section : &container_section;
+  internal_add_atom(sec,a);
+}
+
+
 size_t atom_size(atom *p,section *sec,taddr pc)
 {
   switch(p->type) {
@@ -314,7 +341,7 @@ size_t atom_size(atom *p,section *sec,taddr pc)
     case SPACE:
       return space_size(p->content.sb,sec,pc);
     case DATADEF:
-      return (p->content.defb->bitsize+7)/8;
+      return (p->content.defb->bitsize+BITSPERBYTE-1)/BITSPERBYTE;
     case ROFFS:
       return roffs_size(p->content.roffs,sec,pc);
     default:
@@ -353,9 +380,10 @@ void print_atom(FILE *f,atom *p)
     case DATA:
       fprintf(f,"data(%lu): ",(unsigned long)p->content.db->size);
       for (i=0;i<p->content.db->size;i++)
-        fprintf(f,"%02x ",p->content.db->data[i]);
+        fprintf(f,"%0*llx ",BITSPERBYTE/4,(unsigned long long)readbyte(
+                p->content.db->data+OCTETS(i)));
       for (rl=p->content.db->relocs; rl; rl=rl->next)
-        print_reloc(f,rl->type,rl->reloc);
+        print_reloc(f,rl);
       break;
     case INSTRUCTION:
       print_instruction(f,p->content.inst);
@@ -363,11 +391,11 @@ void print_atom(FILE *f,atom *p)
     case SPACE:
       fprintf(f,"space(%lu,fill=",
               (unsigned long)(p->content.sb->space*p->content.sb->size));
-      for (i=0; i<p->content.sb->size; i++)
+      for (i=0; i<OCTETS(p->content.sb->size); i++)
         fprintf(f,"%02x%c",(unsigned char)p->content.sb->fill[i],
-                (i==p->content.sb->size-1)?')':' ');
+                (i==OCTETS(p->content.sb->size)-1)?')':' ');
       for (rl=p->content.sb->relocs; rl; rl=rl->next)
-        print_reloc(f,rl->type,rl->reloc);
+        print_reloc(f,rl);
       break;
     case DATADEF:
       fprintf(f,"datadef(%lu bits)",(unsigned long)p->content.defb->bitsize);
@@ -397,7 +425,7 @@ void print_atom(FILE *f,atom *p)
         fprintf(f,"none");
       break;
     case RORG:
-      fprintf(f,"rorg: relocate to 0x%llx",ULLTADDR(*p->content.rorg));
+      fprintf(f,"rorg: relocate to %#llx",ULLTADDR(*p->content.rorg));
       break;
     case RORGEND:
       fprintf(f,"rorg end");
@@ -425,11 +453,24 @@ void print_atom(FILE *f,atom *p)
 /* prints and formats an expression from a PRINTEXPR atom */
 void atom_printexpr(printexpr *pexp,section *sec,taddr pc)
 {
+  symbol *base=NULL;
   taddr t;
   long long v;
   int i;
 
-  eval_expr(pexp->print_exp,&t,sec,pc);
+  if (!eval_expr(pexp->print_exp,&t,sec,pc)) {
+    find_base(pexp->print_exp,&base,sec,pc);
+    if (base!=NULL &&
+        base->type==IMPORT && !(base->flags&(EXPORT|COMMON|WEAK))) {
+      printf("<undefined>");
+      if (t == 0)
+        return;
+      if (t > 0)
+        putchar('+');
+      pexp->type = PEXP_SDEC;
+    }
+  }
+
   if (pexp->type==PEXP_SDEC && (t&(1LL<<(pexp->size-1)))!=0) {
     /* signed decimal */
     v = -1;
@@ -504,11 +545,11 @@ atom *add_data_atom(section *sec,size_t sz,taddr alignment,taddr c)
   atom *a;
 
   db->size = sz;
-  db->data = mymalloc(sz);
+  db->data = mymalloc(OCTETS(sz));
   if (sz > 1)
     setval(BIGENDIAN,db->data,sz,c);
   else
-    *(db->data) = c;
+    writebyte(db->data,c);
 
   a = new_data_atom(db,alignment);
   add_atom(sec,a);
@@ -516,7 +557,8 @@ atom *add_data_atom(section *sec,size_t sz,taddr alignment,taddr c)
 }
 
 
-void add_leb128_atom(section *sec,taddr c)
+/* FIXME: does DWARF support bytes with more than 8 bits? */
+void add_leb128_atom(section *sec,utaddr c)
 {
   taddr b;
 
@@ -529,6 +571,7 @@ void add_leb128_atom(section *sec,taddr c)
 }
 
 
+/* FIXME: does DWARF support bytes with more than 8 bits? */
 void add_sleb128_atom(section *sec,taddr c)
 {
   int done = 0;
@@ -546,14 +589,15 @@ void add_sleb128_atom(section *sec,taddr c)
 }
 
 
-atom *add_bytes_atom(section *sec,void *p,size_t sz)
+/* FIXME: does DWARF support bytes with more than 8 bits? */
+atom *add_char_atom(section *sec,const void *p,size_t len)
 {
   dblock *db = new_dblock();
   atom *a;
 
-  db->size = sz;
-  db->data = mymalloc(sz);
-  memcpy(db->data,p,sz);
+  db->size = (len+octetsperbyte-1) / octetsperbyte;
+  db->data = mycalloc(OCTETS(db->size));
+  memcpy(db->data,p,len);
   a = new_data_atom(db,1);
   add_atom(sec,a);
   return a;
@@ -602,8 +646,6 @@ atom *new_space_atom(expr *space,size_t size,expr *fill)
 {
   atom *new = new_atom(SPACE,1);
 
-  if (size<1)
-    ierror(0);  /* usually an error in syntax-module */
   new->content.sb = new_sblock(space,size,fill);
   return new;
 }  
@@ -638,7 +680,7 @@ atom *new_opts_atom(void *o)
 }
 
 
-atom *new_text_atom(char *txt)
+atom *new_text_atom(const char *txt)
 {
   atom *new = new_atom(PRINTTEXT,1);
 
@@ -690,7 +732,7 @@ atom *new_rorgend_atom(void)
 }
 
 
-atom *new_assert_atom(expr *aexp,char *exp,char *msg)
+atom *new_assert_atom(expr *aexp,const char *exp,const char *msg)
 {
   atom *new = new_atom(ASSERT,1);
 
@@ -702,7 +744,7 @@ atom *new_assert_atom(expr *aexp,char *exp,char *msg)
 }
 
 
-atom *new_nlist_atom(char *name,int type,int other,int desc,expr *value)
+atom *new_nlist_atom(const char *name,int type,int other,int desc,expr *value)
 {
   atom *new = new_atom(NLIST,1);
 

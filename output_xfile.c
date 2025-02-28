@@ -1,11 +1,14 @@
-/* output_xfile.c Sharp X68000 Xfile output driver for vasm */
-/* (c) in 2018,2020,2021 by Frank Wille */
+/* xfile.c Sharp X68000 Xfile output driver for vasm */
+/* (c) in 2018,2020,2021,2024 by Frank Wille */
 
 #include "vasm.h"
 #include "output_xfile.h"
 #if defined(OUTXFIL) && defined(VASM_CPU_M68K)
-static char *copyright="vasm xfile output module 0.3 (c) 2018,2020,2021 Frank Wille";
+static char *copyright="vasm xfile output module 0.4a (c) 2018,2020,2021,2024 Frank Wille";
 
+static char *exec_symname;
+static uint32_t exec_offs;
+static uint8_t loadmode;
 static int max_relocs_per_atom;
 static section *sections[3];
 static utaddr secsize[3];
@@ -13,72 +16,6 @@ static utaddr secoffs[3];
 static utaddr sdabase,lastoffs;
 
 #define SECT_ALIGN 2  /* Xfile sections have to be aligned to 16 bits */
-
-
-static void xfile_initwrite(section *sec,symbol *sym)
-{
-  int i;
-
-  /* find exactly one .text, .data and .bss section for xfile */
-  sections[S_TEXT] = sections[S_DATA] = sections[S_BSS] = NULL;
-  secsize[S_TEXT] = secsize[S_DATA] = secsize[S_BSS] = 0;
-
-  for (; sec; sec=sec->next) {
-    /* section size is assumed to be in in (sec->pc - sec->org), otherwise
-       we would have to calculate it from the atoms and store it there */
-    if ((sec->pc - sec->org) > 0 || (sec->flags & HAS_SYMBOLS)) {
-      i = get_sec_type(sec);
-      if (i<S_TEXT || i>S_BSS) {
-        output_error(3,sec->attr);  /* section attributes not supported */
-        i = S_TEXT;
-      }
-      if (!sections[i]) {
-        sections[i] = sec;
-        secsize[i] = (get_sec_size(sec) + SECT_ALIGN - 1) /
-                     SECT_ALIGN * SECT_ALIGN;
-        sec->idx = i;  /* section index 0:text, 1:data, 2:bss */
-      }
-      else
-        output_error(7,sec->name);
-    }
-  }
-
-  secoffs[S_TEXT] = 0;
-  secoffs[S_DATA] = secsize[S_TEXT] + balign(secsize[S_TEXT],SECT_ALIGN);
-  secoffs[S_BSS] = secoffs[S_DATA] + secsize[S_DATA] +
-                  balign(secsize[S_DATA],SECT_ALIGN);
-  /* define small data base as .data+32768 @@@FIXME! */
-  sdabase = secoffs[S_DATA] + 0x8000;
-}
-
-
-static void xfile_header(FILE *f,unsigned long tsize,unsigned long dsize,
-                         unsigned long bsize)
-{
-  XFILE hdr;
-
-  memset(&hdr,0,sizeof(XFILE));
-  setval(1,hdr.x_id,2,0x4855);  /* "HU" ID for Human68k */
-  setval(1,hdr.x_textsz,4,tsize);
-  setval(1,hdr.x_datasz,4,dsize);
-  setval(1,hdr.x_heapsz,4,bsize);
-  /* x_relocsz and x_syminfsz will be patched later */
-  fwdata(f,&hdr,sizeof(XFILE));
-}
-
-
-static void checkdefined(rlist *rl,section *sec,taddr pc,atom *a)
-{
-  if (rl->type <= LAST_STANDARD_RELOC) {
-    nreloc *r = (nreloc *)rl->reloc;
-
-    if (EXTREF(r->sym))
-      output_atom_error(8,a,r->sym->name,sec->name,
-                        (unsigned long)pc+r->byteoffset,rl->type);
-  }
-  else
-    ierror(0);
-}
 
 
 static taddr xfile_sym_value(symbol *sym)
@@ -93,32 +30,107 @@ static taddr xfile_sym_value(symbol *sym)
 }
 
 
+static void xfile_initwrite(section *sec,symbol *sym)
+{
+  int i;
+
+  /* find exactly one .text, .data and .bss section for xfile */
+  sections[S_TEXT] = sections[S_DATA] = sections[S_BSS] = NULL;
+  secsize[S_TEXT] = secsize[S_DATA] = secsize[S_BSS] = 0;
+
+  for (; sec; sec=sec->next) {
+    if (get_sec_size(sec) > 0 || (sec->flags & HAS_SYMBOLS)) {
+      i = get_sec_type(sec);
+      if (i<S_TEXT || i>S_BSS) {
+        output_error(3,sec->attr);  /* section attributes not supported */
+        i = S_TEXT;
+      }
+      if (!sections[i]) {
+        uint64_t sz = get_sec_size(sec);
+
+        sec->idx = i;  /* section index 0:text, 1:data, 2:bss */
+        sections[i] = sec;
+        if (sz+SECT_ALIGN <= 0x100000000ULL)
+          secsize[i] = (sz + SECT_ALIGN - 1) / SECT_ALIGN * SECT_ALIGN;
+        else
+          output_error(23,sec->name,
+                       0x100000000ULL-SECT_ALIGN,(unsigned long long)sz);
+      }
+      else
+        output_error(7,sec->name);
+    }
+  }
+
+  secoffs[S_TEXT] = 0;
+  secoffs[S_DATA] = secsize[S_TEXT] + balign(secsize[S_TEXT],SECT_ALIGN);
+  secoffs[S_BSS] = secoffs[S_DATA] + secsize[S_DATA] +
+                  balign(secsize[S_DATA],SECT_ALIGN);
+  /* define small data base as .data+32768 @@@FIXME! */
+  sdabase = secoffs[S_DATA] + 0x8000;
+
+  /* find start label */
+  if (exec_symname != NULL) {
+    for (; sym; sym=sym->next) {
+      if (!strcmp(exec_symname,sym->name)) {
+        exec_offs = xfile_sym_value(sym);
+        return;
+      }
+    }
+    output_error(6,exec_symname);  /* start label not found */
+  }
+}
+
+
+static void xfile_header(FILE *f,unsigned long tsize,unsigned long dsize,
+                         unsigned long bsize)
+{
+  XFILE hdr;
+
+  memset(&hdr,0,sizeof(XFILE));
+  setval(1,hdr.x_id,2,0x4855);  /* "HU" ID for Human68k */
+  hdr.x_loadmode = loadmode;
+  setval(1,hdr.x_execaddr,4,exec_offs);
+  setval(1,hdr.x_textsz,4,tsize);
+  setval(1,hdr.x_datasz,4,dsize);
+  setval(1,hdr.x_heapsz,4,bsize);
+  /* x_relocsz and x_syminfsz will be patched later */
+  fwdata(f,&hdr,sizeof(XFILE));
+}
+
+
+static void checkdefined(rlist *rl,section *sec,taddr pc,atom *a)
+{
+  if (is_std_reloc(rl)) {
+    nreloc *r = (nreloc *)rl->reloc;
+
+    if (EXTREF(r->sym))
+      output_atom_error(8,a,r->sym->name,sec->name,
+                        (unsigned long)pc+r->byteoffset,rl->type);
+  }
+  else
+    ierror(0);
+}
+
+
 static void do_relocs(section *asec,taddr pc,atom *a)
 /* Try to resolve all relocations in a DATA or SPACE atom.
    Very simple implementation which can only handle basic 68k relocs. */
 {
+  rlist *rl = get_relocs(a);
   int rcnt = 0;
   section *sec;
-  rlist *rl;
-
-  if (a->type == DATA)
-    rl = a->content.db->relocs;
-  else if (a->type == SPACE)
-    rl = a->content.sb->relocs;
-  else
-    rl = NULL;
 
   while (rl) {
-    switch (rl->type) {
+    switch (std_reloc(rl)) {
       case REL_SD:
         checkdefined(rl,asec,pc,a);
-        patch_nreloc(a,rl,1,
+        patch_nreloc(a,rl,
                      (xfile_sym_value(((nreloc *)rl->reloc)->sym)
                       + nreloc_real_addend(rl->reloc)) - sdabase,1);
         break;
       case REL_PC:
         checkdefined(rl,asec,pc,a);
-        patch_nreloc(a,rl,1,
+        patch_nreloc(a,rl,
                      (xfile_sym_value(((nreloc *)rl->reloc)->sym)
                       + nreloc_real_addend(rl->reloc)) -
                      (pc + ((nreloc *)rl->reloc)->byteoffset),1);
@@ -127,14 +139,14 @@ static void do_relocs(section *asec,taddr pc,atom *a)
         rcnt++;
         checkdefined(rl,asec,pc,a);
         sec = ((nreloc *)rl->reloc)->sym->sec;
-        if (!patch_nreloc(a,rl,0,
+        if (!patch_nreloc(a,rl,
                           secoffs[sec?sec->idx:0] +
                           ((nreloc *)rl->reloc)->addend,1))
           break;  /* field overflow */
         if (((nreloc *)rl->reloc)->size == 32)
           break;  /* only support 32-bit absolute */
       default:
-        unsupp_reloc_error(rl);
+        unsupp_reloc_error(a,rl);
         break;
     }
     if (a->type == SPACE)
@@ -174,7 +186,7 @@ static size_t xfile_symboltable(FILE *f,symbol *sym)
 {
   static const int labtype[] = { XSYM_TEXT,XSYM_DATA,XSYM_BSS };
   size_t len = 0;
-  char *p;
+  const char *p;
 
   for (; sym; sym=sym->next) {
     if (!(sym->flags & VASMINTERN)
@@ -231,15 +243,9 @@ static size_t xfile_writerelocs(FILE *f,section *sec)
 
       npc = pcalign(a,pc);
 
-      if (a->type == DATA)
-        rl = a->content.db->relocs;
-      else if (a->type == SPACE)
-        rl = a->content.sb->relocs;
-      else
-        rl = NULL;
-
+      rl = get_relocs(a);
       while (rl) {
-        if (rl->type==REL_ABS && ((nreloc *)rl->reloc)->size==32)
+        if (std_reloc(rl)==REL_ABS && ((nreloc *)rl->reloc)->size==32)
           sortoffs[nrel++] = ((nreloc *)rl->reloc)->byteoffset;
         rl = rl->next;
       }
@@ -306,12 +312,14 @@ static void write_output(FILE *f,section *sec,symbol *sym)
 
 static int output_args(char *p)
 {
-#if 0
-  if (!strncmp(p,"-startoffs=",11)) {
-    startoffs = atoi(p+11);
+  if (!strncmp(p,"-exec=",6)) {
+    exec_symname = p + 6;
     return 1;
   }
-#endif
+  else if (!strcmp(p,"-loadhigh")) {
+    loadmode = XLMD_HIGHADDR;
+    return 1;
+  }
   return 0;
 }
 

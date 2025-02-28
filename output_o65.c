@@ -1,11 +1,11 @@
-/* output_o65.c Andre Fachat's o65 relocatable binary format for vasm */
+/* o65.c Andre Fachat's o65 relocatable binary format for vasm */
 /* (c) in 2021 by Frank Wille */
 
 #include <time.h>
 #include "vasm.h"
 
 #if defined(OUTO65) && defined(VASM_CPU_650X)
-static char *out_copyright="vasm o65 output module 0.1 (c) 2021 Frank Wille";
+static char *out_copyright="vasm o65 output module 0.3 (c) 2021,2022,2024 Frank Wille";
 
 #define S_ZERO (S_BSS+1)
 #define NSECS (S_ZERO+1)        /* o65 supports text, data, bss, zero */
@@ -21,7 +21,7 @@ static char *out_copyright="vasm o65 output module 0.1 (c) 2021 Frank Wille";
 
 struct o65Import {
   struct o65Import *next;
-  char *name;
+  const char *name;
   int idx;
 };
 
@@ -96,9 +96,7 @@ static void o65_initwrite(section *sec)
 
   /* find exactly one .text, .data, .bss and .zero section */
   for (; sec; sec=sec->next) {
-    /* section size is assumed to be in in (sec->pc - sec->org), otherwise
-       we would have to calculate it from the atoms and store it there */
-    if ((sec->pc - sec->org) > 0 || (sec->flags & HAS_SYMBOLS)) {
+    if (get_sec_size(sec)>0 || (sec->flags & HAS_SYMBOLS)) {
       i = get_sec_type(sec);
 
       if (i == S_ABS)
@@ -153,15 +151,16 @@ static void o65_initwrite(section *sec)
 }
 
 
-#ifdef VASM_CPU_650X
 static uint16_t o65_cpu(void)
 {
   uint16_t c;
 
-  if (cpu_type & ILL)
+  if (cpu_type & WDC65816)
+    return MO65_65816;
+  else if (cpu_type & ILL)
     c = 4;  /* NMOS6502 including illegal opcodes */
   else if (cpu_type & HU6280)
-    c = 1;  /* @@@ HU6280 bit does not exit - flag as C02 */
+    c = 1;  /* @@@ HU6280 bit does not exist - flag as C02 */
   else if (cpu_type & CSGCE02)
     c = 3;  /* 65CE02 */
   else if (cpu_type & WDC02)
@@ -172,12 +171,6 @@ static uint16_t o65_cpu(void)
     c = 0;
   return c << 4;
 }
-#else  /* 65816 */
-static uint16_t o65_cpu(void)
-{
-  return 0;
-}
-#endif
 
 
 static int o65_simple(void)
@@ -282,22 +275,32 @@ static void o65_header(FILE *f)
 
 static int o65_rtype(rlist *rl)
 {
-  if (rl->type == REL_ABS) {
+  if (std_reloc(rl) == REL_ABS) {
     nreloc *r = (nreloc *)rl->reloc;
 
     if (r->bitoffset)
       return 0;
 
-    if ((r->mask & 0xffffff) != 0xffffff && r->size==8) {
-      if ((r->mask & 0xffffff) == 0xff0000)
-        return 0xa0;  /* segment-byte of 24-bit address */
-      else if ((r->mask & 0xffff) == 0xff00)
-        return 0x40;  /* high-byte of 16-bit address */
-      else if (r->mask == 0xff)
-        return 0x20;  /* low-byte of 16-bit address */
+    if ((r->mask & 0xffffff) != 0xffffff) {
+      if (r->size == 8) {
+        if ((r->mask & 0xffffff) == 0xff0000)
+          return 0xa0;  /* segment-byte of 24-bit address */
+        else if ((r->mask & 0xffff) == 0xff00)
+          return 0x40;  /* high-byte of 16-bit address */
+        else if (r->mask == 0xff)
+          return 0x20;  /* low-byte of 16-bit address */
+      }
+      else if (r->size == 16) {
+        if (r->mask == 0xffff)
+          return 0x80;  /* 16-bit address */
+        else if ((r->mask & 0xffff) == 0xff00)
+          return 0x40;  /* high-byte of 16-bit address to low-byte */
+        else if (r->mask == 0xff)
+          return 0x20;  /* low-byte of 16-bit address to low-byte */
+      }
     }
     else if (r->size == 8)
-      return 0x20;  /* probably an 8-bit xref to an absolute value */
+      return 0x21;  /* probably an 8-bit xref to an absolute value */
     else if (r->size == 16)
       return 0x80;  /* 16-bit address */
     else if (r->size == 24)
@@ -334,7 +337,7 @@ static void add_o65reloc(int secno,taddr offs,uint8_t type,uint8_t segid,
 }
 
 
-static int add_import(char *name)
+static int add_import(const char *name)
 {
   static struct o65Import *last;
   hashdata data;
@@ -361,22 +364,16 @@ static int add_import(char *name)
 static void do_relocs(int secno,taddr offs,atom *p)
 /* Try to resolve all relocations in a DATA or SPACE atom. */
 {
-  rlist *rl;
-
-  if (p->type == DATA)
-    rl = p->content.db->relocs;
-  else if (p->type == SPACE)
-    rl = p->content.sb->relocs;
-  else
-    rl = NULL;
+  rlist *rl = get_relocs(p);
 
   for (; rl!=NULL; rl=rl->next) {
     uint8_t type,segid;
     int import;
 
     if (type = o65_rtype(rl)) {
-      symbol *sym = ((nreloc *)rl->reloc)->sym;
-      taddr a = ((nreloc *)rl->reloc)->addend;
+      nreloc *r = (nreloc *)rl->reloc;
+      symbol *sym = r->sym;
+      taddr a = r->addend;
 
       if (sym->type == IMPORT) {
         /* reference to external symbol, add its name to import-list */
@@ -391,24 +388,29 @@ static void do_relocs(int secno,taddr offs,atom *p)
       }
 
       switch (type) {
+        case 0x21:  /* 8-bit reference (zero page or immediate) */
+          if (a<-0xff || a>0xff)
+            output_atom_error(12,p,STD_REL_TYPE(rl->type),
+                              (unsigned long)r->mask,sym->name,
+                              (unsigned long)a,r->size);
+          type = 0x20;
         case 0x20:  /* address low-byte */
-          patch_nreloc(p,rl,0,a&0xff,0);
+          patch_nreloc(p,rl,a&0xff,0);
           break;
         case 0x40:  /* address high-byte */
-          patch_nreloc(p,rl,0,(a&0xff00)>>8,0);
+          patch_nreloc(p,rl,(a&0xff00)>>8,0);
           break;
         case 0xa0:  /* segment-byte of 24-bit address */
-          patch_nreloc(p,rl,0,(a&0xff0000)>>16,0);
+          patch_nreloc(p,rl,(a&0xff0000)>>16,0);
           break;
         default:
-          patch_nreloc(p,rl,1,a,0);
+          patch_nreloc(p,rl,a,0);
           break;
       }
-      add_o65reloc(secno,offs+((nreloc *)rl->reloc)->byteoffset,
-                   type,segid,import,a);
+      add_o65reloc(secno,offs+r->byteoffset,type,segid,import,a);
     }
     else
-      unsupp_reloc_error(rl);
+      unsupp_reloc_error(p,rl);
   }
 }
 

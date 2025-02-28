@@ -1,4 +1,4 @@
-/* output_aout.h header file for a.out objects */
+/* aout.h header file for a.out objects */
 /* (c) in 2008,2020 by Frank Wille */
 
 #include "stabs.h"
@@ -84,13 +84,13 @@ struct relocation_info {
 
 /* vasm specific - used to generate a.out files */
 
-#define STRHTABSIZE 0x10000
-#define SYMHTABSIZE 0x10000
+#define ASTRTABSIZE 0x10000
+#define ASYMTABSIZE 0x10000
 
 struct StrTabNode {
   struct node n;
   struct StrTabNode *hashchain;
-  char *str;
+  const char *str;
   uint32_t offset;
 };
 
@@ -103,7 +103,7 @@ struct StrTabList {
 struct SymbolNode {
   struct node n;
   struct SymbolNode *hashchain;
-  char *name;
+  const char *name;
   struct nlist32 s;
   uint32_t index;
 };
